@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ассистент — демо ML</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66;
+    --border: #e2e2dc; --accent: #2f6fde; --user: #e8effc; --rec: #d64545; --debug: #f0f0eb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615; --panel: #1f1f1d; --text: #ececea; --muted: #9a9a94;
+      --border: #33332f; --accent: #6b9bf0; --user: #22314d; --rec: #e06060; --debug: #262624;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; height: 100dvh; }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+  h1 { font-size: 18px; margin: 0; }
+  header label { color: var(--muted); font-size: 13px; }
+  #log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 4px 0 12px; }
+  .msg { max-width: 85%; padding: 10px 12px; border-radius: 12px; background: var(--panel); border: 1px solid var(--border); }
+  .msg.user { align-self: flex-end; background: var(--user); border-color: transparent; }
+  .msg.error { border-color: var(--rec); }
+  .debug { margin-top: 6px; padding: 6px 8px; border-radius: 6px; background: var(--debug);
+           font: 12px/1.4 ui-monospace, Consolas, monospace; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+  form { display: flex; gap: 8px; }
+  input[type=text] { flex: 1; min-width: 0; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border);
+                     background: var(--panel); color: var(--text); font: inherit; }
+  button { padding: 10px 14px; border-radius: 10px; border: 1px solid var(--border); background: var(--panel);
+           color: var(--text); font: inherit; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button#mic.recording { background: var(--rec); border-color: var(--rec); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  .hint { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Голосовой ассистент · демо ML</h1>
+    <div>
+      <label><input type="checkbox" id="speak" checked> озвучивать</label>
+      <label><input type="checkbox" id="showDebug" checked> отладка</label>
+      <button type="button" id="reset">Сброс диалога</button>
+    </div>
+  </header>
+  <div id="log" aria-live="polite"></div>
+  <form id="form">
+    <button type="button" id="mic" aria-label="Записать голос">🎙</button>
+    <input type="text" id="text" placeholder="Например: напомни завтра в 10 позвонить Ивану" autocomplete="off">
+    <button class="primary" id="send">Отправить</button>
+  </form>
+  <p class="hint">Нажмите 🎙, скажите запрос и нажмите ещё раз. До 25 секунд.</p>
+</main>
+<script>
+const log = document.getElementById("log");
+const textInput = document.getElementById("text");
+const mic = document.getElementById("mic");
+const send = document.getElementById("send");
+
+function add(role, text, debug) {
+  const div = document.createElement("div");
+  div.className = "msg " + role;
+  div.textContent = text;
+  if (debug && document.getElementById("showDebug").checked) {
+    const pre = document.createElement("div");
+    pre.className = "debug";
+    pre.textContent = debug;
+    div.appendChild(pre);
+  }
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+function debugText(r) {
+  const lines = (r.tool_calls || []).map(c => `↳ ${c.name}(${JSON.stringify(c.args)})`);
+  const asr = r.asr_latency_s != null ? `ASR ${r.asr_latency_s.toFixed(1)}s · ` : "";
+  if (r.latency_s != null) {
+    lines.push(`${asr}LLM ${r.latency_s.toFixed(1)}s · ${r.input_tokens}+${r.output_tokens} tok · ${r.cost_rub.toFixed(3)} ₽`);
+  }
+  return lines.join("\n");
+}
+
+function speak(text) {
+  if (!document.getElementById("speak").checked || !("speechSynthesis" in window)) return;
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = "ru-RU";
+  speechSynthesis.cancel();
+  speechSynthesis.speak(u);
+}
+
+async function call(url, options) {
+  const busy = [mic, send];
+  busy.forEach(b => b.disabled = true);
+  try {
+    const res = await fetch(url, options);
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.detail || `Ошибка ${res.status}`);
+    return body;
+  } finally {
+    busy.forEach(b => b.disabled = false);
+  }
+}
+
+async function handle(promise) {
+  try {
+    const r = await promise;
+    if (r.transcript) add("user", r.transcript);
+    add("assistant", r.text, debugText(r));
+    speak(r.text);
+  } catch (e) {
+    add("assistant error", e.message);
+  }
+}
+
+document.getElementById("form").addEventListener("submit", e => {
+  e.preventDefault();
+  const text = textInput.value.trim();
+  if (!text) return;
+  textInput.value = "";
+  add("user", text);
+  handle(call("/api/chat", {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({text}),
+  }));
+});
+
+let recorder = null;
+mic.addEventListener("click", async () => {
+  if (recorder) { recorder.stop(); return; }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({audio: true});
+  } catch {
+    add("assistant error", "Нет доступа к микрофону");
+    return;
+  }
+  const chunks = [];
+  recorder = new MediaRecorder(stream);
+  recorder.ondataavailable = e => chunks.push(e.data);
+  recorder.onstop = () => {
+    stream.getTracks().forEach(t => t.stop());
+    mic.classList.remove("recording");
+    const type = recorder.mimeType.split(";")[0] || "audio/webm";
+    recorder = null;
+    const form = new FormData();
+    form.append("audio", new Blob(chunks, {type}), "voice" + (type.includes("mp4") ? ".m4a" : ".webm"));
+    handle(call("/api/voice", {method: "POST", body: form}));
+  };
+  recorder.start();
+  mic.classList.add("recording");
+  setTimeout(() => recorder && recorder.stop(), 25000);
+});
+
+document.getElementById("reset").addEventListener("click", async () => {
+  await fetch("/api/reset", {method: "POST"});
+  log.innerHTML = "";
+});
+</script>
+</body>
+</html>
