@@ -25,6 +25,15 @@ class ToolCall:
     args: dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class Pricing:
+    input_rub_per_1k: float
+    output_rub_per_1k: float
+
+    def cost(self, input_tokens: int, output_tokens: int) -> float:
+        return (input_tokens * self.input_rub_per_1k + output_tokens * self.output_rub_per_1k) / 1000
+
+
 @dataclass(slots=True)
 class AgentReply:
     text: str
@@ -42,13 +51,13 @@ class Assistant:
         mcp_client: Client[Any],
         history: ChatHistory,
         tz: ZoneInfo,
-        price_rub_per_1k_tokens: float,
+        pricing: Pricing,
     ) -> None:
         self._model = model
         self._mcp = mcp_client
         self._history = history
         self._tz = tz
-        self._price = price_rub_per_1k_tokens
+        self._pricing = pricing
 
     async def handle(self, user_id: str, text: str, now: datetime | None = None) -> AgentReply:
         started = time.perf_counter()
@@ -85,7 +94,7 @@ class Assistant:
         final = messages[-1] if messages else None
         if isinstance(final, AIMessage) and final.text.strip():
             reply.text = final.text.strip()
-        reply.cost_rub = (reply.input_tokens + reply.output_tokens) / 1000 * self._price
+        reply.cost_rub = self._pricing.cost(reply.input_tokens, reply.output_tokens)
         return reply
 
     @staticmethod

@@ -4,12 +4,30 @@ A check gets the arguments of the matched tool call and returns an error
 message, or None when the call is correct.
 """
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any
 
 Check = Callable[[dict[str, Any]], str | None]
+
+END_TOLERANCE = timedelta(minutes=1)
+
+# Answers are spoken by TTS, so formatting characters are read aloud or break intonation.
+_MARKDOWN_RE = re.compile(r"\*\*|__|^#+\s|^\s*[-*•]\s|`", re.MULTILINE)
+_EMOJI_RE = re.compile("[\U0001f300-\U0001faff☀-➿]")
+
+
+def speech_issues(answer: str) -> list[str]:
+    issues = []
+    if _MARKDOWN_RE.search(answer):
+        issues.append("в ответе markdown — плохо для озвучивания")
+    if "\n" in answer.strip():
+        issues.append("в ответе переносы строк")
+    if _EMOJI_RE.search(answer):
+        issues.append("в ответе эмодзи")
+    return issues
 
 
 def _parse(value: Any) -> datetime | None:
@@ -57,7 +75,10 @@ def on_date(key: str, expected: str) -> Check:
 
 
 def covers(start_iso: str, end_iso: str, max_extra: timedelta = timedelta(days=1)) -> Check:
-    """Range [start_time, end_time] includes the expected period and is not much wider."""
+    """Range [start_time, end_time] includes the expected period and is not much wider.
+
+    An end up to one minute early is accepted: 23:59:00 instead of 23:59:59 loses nothing in practice.
+    """
     need_start = datetime.fromisoformat(start_iso)
     need_end = datetime.fromisoformat(end_iso)
 
@@ -65,7 +86,7 @@ def covers(start_iso: str, end_iso: str, max_extra: timedelta = timedelta(days=1
         start, end = _parse(args.get("start_time")), _parse(args.get("end_time"))
         if start is None or end is None:
             return f"диапазон {args.get('start_time')!r}..{args.get('end_time')!r}: не ISO 8601"
-        if start > need_start or end < need_end:
+        if start > need_start or end < need_end - END_TOLERANCE:
             return f"диапазон {start.isoformat()}..{end.isoformat()} не покрывает {start_iso}..{end_iso}"
         if (need_start - start) + (end - need_end) > max_extra:
             return f"диапазон {start.isoformat()}..{end.isoformat()} слишком широкий"

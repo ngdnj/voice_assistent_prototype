@@ -22,12 +22,13 @@ from fastmcp import Client
 from assistant.config import Settings, get_settings
 from assistant.events.models import EventType
 from assistant.events.storage import EventStorage
-from assistant.llm.agent import AgentReply, Assistant
+from assistant.llm.agent import AgentReply, Assistant, Pricing
 from assistant.llm.history import InMemoryChatHistory
 from assistant.llm.model import build_chat_model
 from assistant.mcp_server.server import build_server
 from assistant.metrics import quantiles
 from evals.cases import CASES, NOW, TZ, Case
+from evals.checks import speech_issues
 
 REPORTS_DIR = Path(__file__).parent / "reports"
 
@@ -62,6 +63,7 @@ def _evaluate(case: Case, reply: AgentReply) -> list[str]:
             errors += [e for check in expect.checks if (e := check(calls[-1].args))]
     answer = reply.text.lower()
     errors += [f"в ответе нет «{w}»" for w in expect.answer_mentions if w.lower() not in answer]
+    errors += speech_issues(reply.text)
     return errors
 
 
@@ -73,9 +75,7 @@ async def _run_case(case: Case, settings: Settings) -> CaseResult:
 
     model = build_chat_model(settings)
     async with Client(build_server(storage, TZ)) as client:
-        assistant = Assistant(
-            model, client, InMemoryChatHistory(10), TZ, settings.llm_price_rub_per_1k_tokens
-        )
+        assistant = Assistant(model, client, InMemoryChatHistory(10), TZ, Pricing(*settings.pricing))
         replies = [await assistant.handle("eval", turn, now=NOW) for turn in case.turns]
     storage.close()
 
@@ -131,16 +131,16 @@ async def main() -> int:
     )
     parser.add_argument("--repeat", type=int, default=1, help="run each case N times to measure stability")
     parser.add_argument("--temperature", type=float, help="override LLM_TEMPERATURE")
-    parser.add_argument("--model", help="override GIGACHAT_MODEL")
+    parser.add_argument("--model", help="override the model of the active LLM_PROVIDER")
     parser.add_argument("--concurrency", type=int, default=4, help="parallel cases (mind API rate limits)")
     args = parser.parse_args()
 
     overrides: dict[str, Any] = {}
     if args.temperature is not None:
         overrides["llm_temperature"] = args.temperature
-    if args.model:
-        overrides["gigachat_model"] = args.model
     settings = get_settings().model_copy(update=overrides)
+    if args.model:
+        settings = settings.with_llm_model(args.model)
 
     cases = [c for c in CASES if not args.k or any(c.id.startswith(p) for p in args.k)]
     if not cases:
@@ -159,12 +159,14 @@ async def main() -> int:
     REPORTS_DIR.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     report = {
-        "model": settings.gigachat_model,
+        "provider": settings.llm_provider,
+        "model": settings.llm_model,
         "temperature": settings.llm_temperature,
         "repeat": args.repeat,
         "results": [asdict(r) for r in results],
     }
-    path = REPORTS_DIR / f"{stamp}-{settings.gigachat_model}-t{settings.llm_temperature}.json"
+    model_slug = settings.llm_model.replace("/", "_")
+    path = REPORTS_DIR / f"{stamp}-{model_slug}-t{settings.llm_temperature}.json"
     path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\nОтчёт: {path}")
     return 0 if all(r.passed for r in results) else 1

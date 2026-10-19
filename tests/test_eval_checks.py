@@ -2,7 +2,7 @@ from datetime import timedelta
 
 from assistant.llm.agent import AgentReply, ToolCall
 from evals.cases import CASES
-from evals.checks import Expect, at, covers, mentions, on_date, types_include
+from evals.checks import Expect, at, covers, mentions, on_date, speech_issues, types_include
 from evals.run import _evaluate
 
 DAY = covers("2026-10-19T00:00:00+03:00", "2026-10-19T23:59:59+03:00", max_extra=timedelta(hours=1))
@@ -52,3 +52,13 @@ def test_all_cases_reference_known_tools() -> None:
     for case in CASES:
         assert isinstance(case.expect, Expect)
         assert case.expect.tool in known, case.id
+
+
+def test_covers_accepts_end_one_minute_early() -> None:
+    assert DAY({"start_time": "2026-10-19T00:00:00+03:00", "end_time": "2026-10-19T23:59:00+03:00"}) is None
+
+
+def test_speech_issues() -> None:
+    assert speech_issues("Завтра в 15:00 встреча с командой.") == []
+    assert speech_issues("Сегодня:\n- **Созвон** в 16:00")
+    assert speech_issues("Готово 👍")

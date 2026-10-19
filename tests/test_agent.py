@@ -2,7 +2,7 @@ from fastmcp import Client
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from assistant.events.storage import EventStorage
-from assistant.llm.agent import Assistant
+from assistant.llm.agent import Assistant, Pricing
 from assistant.llm.history import InMemoryChatHistory
 from assistant.llm.prompts import render_system_prompt
 from tests.conftest import NOW, TZ, scripted_model
@@ -41,7 +41,8 @@ async def test_agent_creates_event_and_keeps_context(mcp_client: Client, storage
         ]
     )
     history = InMemoryChatHistory(max_turns=10)
-    assistant = Assistant(model, mcp_client, history, TZ, price_rub_per_1k_tokens=1.0)
+    pricing = Pricing(input_rub_per_1k=1.0, output_rub_per_1k=10.0)
+    assistant = Assistant(model, mcp_client, history, TZ, pricing)
 
     first = await assistant.handle("u1", "Поставь встречу с Иваном завтра", now=NOW)
     assert first.tool_calls == []
@@ -51,7 +52,7 @@ async def test_agent_creates_event_and_keeps_context(mcp_client: Client, storage
     assert [c.name for c in second.tool_calls] == ["create_event"]
     assert second.text == "Готово, встреча с Иваном завтра в 16:00."
     assert second.input_tokens == 1900 and second.output_tokens == 100
-    assert second.cost_rub == 2.0
+    assert second.cost_rub == 1.9 + 1.0
 
     [event] = storage.search("u1", "Иван")
     assert event.when is not None and event.when.isoformat() == "2026-10-20T16:00:00+03:00"

@@ -9,7 +9,7 @@ from redis.asyncio import Redis
 
 from assistant.config import Settings
 from assistant.events.storage import EventStorage
-from assistant.llm.agent import Assistant
+from assistant.llm.agent import Assistant, Pricing
 from assistant.llm.history import ChatHistory, InMemoryChatHistory, RedisChatHistory
 from assistant.llm.model import build_chat_model
 from assistant.mcp_server.server import build_server
@@ -36,7 +36,7 @@ async def open_assistant(settings: Settings) -> AsyncIterator[Assistant]:
         history = InMemoryChatHistory(settings.history_max_turns)
     try:
         async with _mcp_client(settings) as client:
-            yield Assistant(model, client, history, settings.tz, settings.llm_price_rub_per_1k_tokens)
+            yield Assistant(model, client, history, settings.tz, Pricing(*settings.pricing))
     finally:
         if redis is not None:
             await redis.aclose()
