@@ -20,20 +20,20 @@ from pathlib import Path
 from typing import Any, get_args
 from zoneinfo import ZoneInfo
 
-from fastmcp import Client
-from langchain_core.language_models import BaseChatModel
-
 from app.agent.agent import AgentReply, Assistant, Pricing
 from app.agent.history import InMemoryChatHistory
+from fastmcp import Client
+from langchain_core.language_models import BaseChatModel
+from tests.fakes.events import EventType
+from tests.fakes.mcp_server import build_server
+from tests.fakes.storage import EventStorage
+
 from app.config import Settings, get_settings
 from app.llm.model import build_chat_model
 from evals.cases import CASES, Case, Category, Split
 from evals.checks import Check, speech_issues
 from evals.cloudru import CloudRuSettings, build_cloudru_model
 from evals.stats import summarize
-from tests.fakes.events import EventType
-from tests.fakes.mcp_server import build_server
-from tests.fakes.storage import EventStorage
 
 REPORTS_DIR = Path(__file__).parent / "reports"
 INFRA_ATTEMPTS = 3

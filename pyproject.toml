@@ -1,35 +1,24 @@
 [project]
-name = "assistant"
+name = "it-gorky-assistant"
 version = "0.1.0"
-description = "Voice assistant for tasks and meetings: LLM agent, MCP tools and ASR"
-readme = "README.md"
-authors = [
-    { name = "LEONIDOS", email = "ltosevikov@gmail.com" }
-]
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.148",
+    "redis>=8.1,<9",
+    # Role 3 (LLM + ASR): app/llm, app/asr, app/config.py, app/metrics.py, evals
     "fastmcp>=4.1",
     "httpx>=0.28",
     "langchain>=1.4",
     "langchain-gigachat>=0.5",
-    "langchain-openai>=1.0",
     "prometheus-client>=0.26",
     "pydantic-settings>=2.16",
-    "python-multipart>=0.0.32",
-    "redis>=8.1",
     "tzdata>=2026.5",
-    "uvicorn>=0.54",
 ]
 
 [project.optional-dependencies]
-asr = [
-    "gigaam[torch]",
-]
-
-[build-system]
-requires = ["uv_build>=0.10.3,<0.11.0"]
-build-backend = "uv_build"
+# Local ASR on CPU (GigaAM, pulls torch); not needed for the text path.
+asr = ["gigaam[torch]"]
+# Only for comparing models in evals via Cloud.ru (evals/cloudru.py); not the product stack.
+compare = ["langchain-openai>=1.0"]
 
 [dependency-groups]
 dev = [
@@ -40,25 +29,39 @@ dev = [
     "ruff>=0.17.1",
 ]
 
+[tool.uv.sources]
+gigaam = { git = "https://github.com/salute-developers/GigaAM", rev = "7447938d791c4f3e643386ee22c33777004293a5" }
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 110
 target-version = "py312"
+# This config came with role 3. Other roles' files are not checked by it until they opt in
+# (remove their paths here); markdown code blocks are not formatted.
+extend-exclude = [
+    "*.md",
+    "app/planner",
+    "app/storage",
+    "tests/test_redis.py",
+    "tests/test_redis_tasks.py",
+    "tests/test_task.py",
+    "tests/test_task_service.py",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC", "RUF"]
 ignore = ["RUF001", "RUF002", "RUF003"]  # Cyrillic in strings/comments is intentional
 
 [tool.ruff.lint.per-file-ignores]
-"src/assistant/llm/prompts.py" = ["E501"]  # prompt text is kept as natural paragraphs
+"app/llm/prompts.py" = ["E501"]  # prompt text is kept as natural paragraphs
 
 [tool.mypy]
 python_version = "3.12"
 strict = true
 ignore_missing_imports = true
-
-[tool.uv.sources]
-gigaam = { git = "https://github.com/salute-developers/GigaAM", rev = "7447938d791c4f3e643386ee22c33777004293a5" }
+# Role 3 paths; other roles add theirs.
+files = ["app/llm", "app/asr", "app/config.py", "app/metrics.py", "evals"]

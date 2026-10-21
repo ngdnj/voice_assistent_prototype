@@ -1,6 +1,14 @@
 from datetime import timedelta
 
+import pytest
+
+# The eval harness drives the agent runner of role 1 (app/agent), which is not in the
+# repository yet. Until it lands these tests are skipped with this reason instead of
+# failing the whole run.
+pytest.importorskip("app.agent.agent", reason="app/agent (role 1) is not in the repository yet")
+
 from app.agent.agent import AgentReply, ToolCall
+
 from evals.cases import CASES
 from evals.checks import (
     Expect,

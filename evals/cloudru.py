@@ -28,7 +28,8 @@ def build_cloudru_model(settings: Settings, cloudru: CloudRuSettings) -> BaseCha
 
     if cloudru.cloudru_api_key is None:
         raise MissingCredentialsError("CLOUDRU_API_KEY is not set, see .env.example")
-    return ChatOpenAI(
+    # langchain-openai is an optional extra (`--extra compare`); without it mypy sees Any here.
+    model: BaseChatModel = ChatOpenAI(
         model=cloudru.cloudru_model,
         api_key=cloudru.cloudru_api_key,
         base_url=cloudru.cloudru_base_url,
@@ -36,3 +37,4 @@ def build_cloudru_model(settings: Settings, cloudru: CloudRuSettings) -> BaseCha
         timeout=settings.llm_timeout_s,
         max_retries=settings.llm_max_retries,
     )
+    return model
