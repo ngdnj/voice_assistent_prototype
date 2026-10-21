@@ -1,0 +1,24 @@
+"""Minimal reminder storage boundary; delivery is outside this contract."""
+
+from typing import Protocol
+from uuid import UUID
+
+from app.planner.reminder import Reminder
+
+
+class ReminderStorageError(Exception):
+    """Reminder storage is unavailable or contains invalid data."""
+
+
+class ReminderAlreadyExistsError(ReminderStorageError):
+    """An existing reminder ID cannot be overwritten by add."""
+
+
+class ReminderRepository(Protocol):
+    async def add(self, reminder: Reminder) -> None:
+        """Store reminder data without scheduling or delivering it."""
+        ...
+
+    async def get(self, *, reminder_id: UUID, owner_id: str) -> Reminder | None:
+        """Return the owner's reminder or None if missing or inaccessible."""
+        ...

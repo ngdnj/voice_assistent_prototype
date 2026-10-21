@@ -155,7 +155,98 @@ async def task_example():
 перезапись и повреждения. Каждый тест удаляет только перечисленные им ключи
 в своём уникальном пространстве; пользовательские задачи TTL не получают.
 
+## Встречи
+
+Встречи реализованы отдельно от задач: `Meeting`, `MeetingService`, async-протокол
+`MeetingRepository` и `RedisMeetingRepository`. Поля: UUID, владелец, название,
+`starts_at`, `ends_at`, `created_at`. Название очищается по краям; владелец и
+название не могут быть пустыми. Все моменты проверяются через общий `to_utc`,
+окончание обязано быть строго позже начала. Начало и конец всегда задаёт
+вызывающий код; длительность не назначается автоматически.
+
+```python
+from datetime import UTC, datetime
+from app.planner.meeting_service import MeetingService
+from app.storage.redis_meetings import RedisMeetingRepository
+
+async def meeting_example(client):
+    service = MeetingService(
+        repository=RedisMeetingRepository(client),
+        clock=lambda: datetime(2026, 10, 22, 8, tzinfo=UTC),
+    )
+    meeting = await service.create_meeting(
+        owner_id="user-42", title="Обсуждение проекта",
+        starts_at=datetime(2026, 10, 22, 9, tzinfo=UTC),
+        ends_at=datetime(2026, 10, 22, 9, 45, tzinfo=UTC),
+    )
+    assert await service.get_meeting(meeting_id=meeting.id, owner_id="user-42") == meeting
+```
+
+Клиент берётся из существующего `redis_connection`, нового подключения на
+операцию нет. Ключ: `it-gorky:v1:meeting:<UUID>`, JSON содержит все шесть полей,
+UUID и UTC-моменты сериализуются строками без потери микросекунд. Запись —
+`SET NX` без TTL; конфликт UUID даёт `MeetingAlreadyExistsError`, ошибки Redis
+или повреждённые данные — `MeetingStorageError`. Чужая и отсутствующая встреча
+возвращают `None`. Восстановление не генерирует новый UUID или время создания.
+Ограничения persistence и резервного копирования выше относятся и к встречам.
+Идемпотентность по action_id, участники, приглашения, интеграции календарей,
+поиск/списки и обнаружение конфликтов не реализованы.
+
+Проверки правил и сервиса: `tests/test_meeting.py`; интеграционные проверки:
+`tests/test_redis_meetings.py`, включаются общим `RUN_REDIS_INTEGRATION=1`.
+
+## Напоминания
+
+Напоминания: отдельные `Reminder`, `ReminderService`, async-протокол
+`ReminderRepository` и `RedisReminderRepository`. Обязательны доверенный
+`owner_id`, непустой `text` (внешние пробелы удаляются), точный `remind_at`.
+Сервис берёт `created_at` из явно переданных часов, UUID генерируется при создании.
+Оба момента проверяются существующим `to_utc` и сохраняются в UTC.
+
+**Прошлое время:** если `remind_at < created_at`, создание отклоняется через
+`PastReminderTimeError` (подкласс `ValueError`) до записи. При равенстве создание
+разрешено. Время не переносится на будущее и не заменяется текущим. Проверка
+использует однократное значение часов при создании, а не время завершения записи.
+После наступления срока сохранённое напоминание продолжает читаться без изменений.
+
+**Доставка отделена от данных:** модель и JSON содержат только `id`, `owner_id`,
+`text`, `remind_at`, `created_at`. Полей `sent`, статуса доставки и попыток нет.
+Отдельная запись состояния доставки в этом блоке не создаётся. Успешное создание
+означает только сохранение данных, не постановку на отправку и не отправленное
+сообщение. Будущий dispatcher должен хранить состояние отправок отдельно,
+ссылаясь на ID напоминания. Получение записи не вычисляет и не подтверждает доставку.
+
+```python
+from datetime import UTC, datetime
+from app.planner.reminder_service import ReminderService
+from app.storage.redis_reminders import RedisReminderRepository
+
+async def reminder_example(client):
+    service = ReminderService(
+        repository=RedisReminderRepository(client),
+        clock=lambda: datetime(2026, 10, 22, 8, tzinfo=UTC),
+    )
+    reminder = await service.create_reminder(
+        owner_id="user-42", text="Позвонить Ивану",
+        remind_at=datetime(2026, 10, 22, 9, tzinfo=UTC),
+    )
+    assert await service.get_reminder(reminder_id=reminder.id, owner_id="user-42") == reminder
+```
+
+Ключ `it-gorky:v1:reminder:<UUID>`, JSON, атомарный `SET NX`, без TTL.
+Чужая/отсутствующая запись возвращает `None`, конфликт UUID —
+`ReminderAlreadyExistsError`, сбой Redis/повреждение — `ReminderStorageError`.
+Ограничения persistence и резервного копирования выше действуют и здесь.
+Планировщик, отправка MAX, повторяющиеся напоминания и идемпотентность по action_id
+не реализованы. Проверки — `tests/test_reminder.py` и `tests/test_redis_reminders.py`;
+интеграционные включаются общим `RUN_REDIS_INTEGRATION=1`.
+
 ## Структура
+
+Минимальные правила времени реализованы в `app/planner/time.py`: aware datetime
+в UTC, IANA-зоны, UTC-границы локального дня и интервалы `[start, end)`.
+Неоднозначные/несуществующие локальные часы отклоняются; дата остаётся `date`.
+Политика DST и примеры — в [backend-контракте](docs/backend-contracts.md#время).
 
 ```text
 app/
