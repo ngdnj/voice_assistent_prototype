@@ -45,7 +45,7 @@ def build_server(storage: EventStorage, tz: ZoneInfo) -> FastMCP:
             "Создать запись пользователя: задачу (task), напоминание (reminder) или встречу (meeting). "
             "Для reminder и meeting время обязательно — если пользователь его не назвал, "
             "не вызывай инструмент, а спроси время. Для задачи без времени, но с датой или сроком "
-            "передай конец этого дня (23:59:00). Для задачи без даты передай null."
+            "передай конец этого дня (23:59:00). Для задачи без даты не передавай datetime."
         )
     )
     def create_event(
@@ -68,6 +68,14 @@ def build_server(storage: EventStorage, tz: ZoneInfo) -> FastMCP:
         when = _parse_iso(datetime, tz, "datetime") if datetime else None
         if when is None and event_type in TYPES_REQUIRING_DATETIME:
             raise ToolError(f"Для {event_type.value} нужно время. Уточни его у пользователя.")
+        # Idempotent: a repeated identical request (model re-running the last action,
+        # a double tap in the UI) must not produce a duplicate record.
+        existing = storage.find_same(user_id, event_type, name, when)
+        if existing is not None:
+            return {
+                "already_exists": existing.to_dict(),
+                "message": "Такая запись уже есть, новая не создана.",
+            }
         event = storage.create(user_id, event_type, name.strip(), description.strip(), when)
         return {"created": event.to_dict()}
 
@@ -104,13 +112,34 @@ def build_server(storage: EventStorage, tz: ZoneInfo) -> FastMCP:
     def get_event_by_query(
         user_id: UserId,
         text: Annotated[str, Field(description="Ключевые слова для поиска, например «Иван встреча».")],
-        start_time: Annotated[str | None, Field(description="Начало периода в ISO 8601 или null.")] = None,
-        end_time: Annotated[str | None, Field(description="Конец периода в ISO 8601 или null.")] = None,
+        start_time: Annotated[
+            str | None, Field(description="Начало периода в ISO 8601. Не передавай, если период не назван.")
+        ] = None,
+        end_time: Annotated[
+            str | None, Field(description="Конец периода в ISO 8601. Не передавай, если период не назван.")
+        ] = None,
     ) -> dict[str, Any]:
         start = _parse_iso(start_time, tz, "start_time") if start_time else None
         end = _parse_iso(end_time, tz, "end_time") if end_time else None
         events = storage.search(user_id, text, start, end)
         return {"count": len(events), "events": [e.to_dict() for e in events]}
+
+    @mcp.tool(
+        description=(
+            "Удалить запись пользователя по её id. id бери из результата get_event_by_query или get_event — "
+            "сначала найди запись. Вызывай, только если пользователь прямо просит удалить или отменить "
+            "запись и подходит ровно одна. Если подходят несколько — не удаляй, а спроси, какую."
+        ),
+        annotations={"destructiveHint": True, "idempotentHint": True},
+    )
+    def delete_event(
+        user_id: UserId,
+        event_id: Annotated[int, Field(description="id записи из результатов поиска.")],
+    ) -> dict[str, Any]:
+        event = storage.delete(user_id, event_id)
+        if event is None:
+            raise ToolError(f"Запись {event_id} не найдена. Найди запись через get_event_by_query.")
+        return {"deleted": event.to_dict()}
 
     return mcp
 

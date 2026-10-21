@@ -52,3 +52,26 @@ def test_search_matches_inflected_forms(storage: EventStorage, query: str, expec
 def test_search_is_isolated_per_user(storage: EventStorage) -> None:
     storage.create("u2", EventType.TASK, "Проверить договор", "", None)
     assert storage.search("u1", "договор") == []
+
+
+def test_find_same_matches_type_name_and_time(storage: EventStorage) -> None:
+    storage.create("u1", EventType.TASK, "Презентация", "", NOW)
+    assert storage.find_same("u1", EventType.TASK, "презентация ", NOW) is not None
+    assert storage.find_same("u1", EventType.TASK, "Презентация", NOW + timedelta(days=1)) is None
+    assert storage.find_same("u1", EventType.MEETING, "Презентация", NOW) is None
+    assert storage.find_same("u2", EventType.TASK, "Презентация", NOW) is None
+
+
+def test_find_same_without_time(storage: EventStorage) -> None:
+    storage.create("u1", EventType.TASK, "Разобрать почту", "", None)
+    assert storage.find_same("u1", EventType.TASK, "Разобрать почту", None) is not None
+
+
+def test_delete_only_own_record(storage: EventStorage) -> None:
+    event = storage.create("u1", EventType.MEETING, "Встреча с Иваном", "", NOW)
+    assert storage.delete("u2", event.id) is None
+    assert storage.search("u1", "Иван")
+    deleted = storage.delete("u1", event.id)
+    assert deleted is not None and deleted.id == event.id
+    assert storage.search("u1", "Иван") == []
+    assert storage.delete("u1", event.id) is None

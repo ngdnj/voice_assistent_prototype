@@ -11,9 +11,12 @@ from assistant.llm.agent import AgentReply
 class FakeAssistant:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.timezones: list[str] = []
 
-    async def handle(self, user_id: str, text: str, now: datetime | None = None) -> AgentReply:
+    async def handle(self, user_id: str, text: str, *, reference_time: datetime, timezone: str) -> AgentReply:
+        assert reference_time.tzinfo is not None
         self.calls.append((user_id, text))
+        self.timezones.append(timezone)
         return AgentReply(text=f"ok: {text}")
 
     async def reset(self, user_id: str) -> None:
@@ -29,6 +32,9 @@ class FakeRecognizer:
         if self.too_long:
             raise AudioTooLongError("Запись 40 с, максимум 25 с")
         return Transcript(self.text, 0.1)
+
+    async def aclose(self) -> None:
+        pass
 
 
 @pytest.fixture
@@ -83,3 +89,11 @@ def test_metrics_endpoint(client: TestClient) -> None:
     res = client.get("/metrics/")
     assert res.status_code == 200
     assert "assistant_request_cost_rub" in res.text
+
+
+def test_transcribe_returns_text_without_calling_agent(client: TestClient, assistant: FakeAssistant) -> None:
+    web.state.recognizer = FakeRecognizer("Что у меня сегодня?")
+    res = client.post("/api/transcribe", files={"audio": ("v.webm", b"\x00" * 100, "audio/webm")})
+    assert res.status_code == 200
+    assert res.json() == {"transcript": "Что у меня сегодня?", "asr_latency_s": 0.1}
+    assert assistant.calls == []

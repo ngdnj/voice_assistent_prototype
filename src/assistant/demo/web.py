@@ -11,6 +11,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -20,7 +21,7 @@ from prometheus_client import make_asgi_app
 from pydantic import BaseModel, Field
 
 from assistant import metrics
-from assistant.asr import AudioTooLongError, SpeechRecognizer, build_recognizer
+from assistant.asr import AudioTooLongError, SpeechRecognizer, Transcript, build_recognizer
 from assistant.config import get_settings
 from assistant.llm.agent import AgentReply, Assistant
 from assistant.runtime import open_assistant
@@ -45,9 +46,12 @@ state = State()
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     state.recognizer = build_recognizer(settings)
-    async with open_assistant(settings) as assistant:
-        state.assistant = assistant
-        yield
+    try:
+        async with open_assistant(settings) as assistant:
+            state.assistant = assistant
+            yield
+    finally:
+        await state.recognizer.aclose()
 
 
 app = FastAPI(title="Assistant ML demo", lifespan=lifespan)
@@ -66,9 +70,13 @@ def _user_id(response: Response, cookie: str | None) -> str:
     return user_id
 
 
-async def _answer(user_id: str, text: str) -> dict[str, Any]:
+async def _answer(user_id: str, text: str, received_at: datetime) -> dict[str, Any]:
+    # The demo has no user profile: every browser gets the zone from settings.
+    timezone = get_settings().timezone
     try:
-        reply: AgentReply = await state.assistant.handle(user_id, text)
+        reply: AgentReply = await state.assistant.handle(
+            user_id, text, reference_time=received_at, timezone=timezone
+        )
     except Exception as exc:
         metrics.AGENT_ERRORS.labels(type(exc).__name__).inc()
         logger.exception("agent failed")
@@ -85,13 +93,10 @@ async def index() -> FileResponse:
 async def chat(
     body: ChatRequest, response: Response, user: Annotated[str | None, Cookie(alias=USER_COOKIE)] = None
 ) -> dict[str, Any]:
-    return await _answer(_user_id(response, user), body.text)
+    return await _answer(_user_id(response, user), body.text, datetime.now(UTC))
 
 
-@app.post("/api/voice")
-async def voice(
-    audio: UploadFile, response: Response, user: Annotated[str | None, Cookie(alias=USER_COOKIE)] = None
-) -> dict[str, Any]:
+async def _transcribe(audio: UploadFile) -> Transcript:
     content_type = (audio.content_type or "").split(";")[0]
     suffix = AUDIO_SUFFIXES.get(content_type)
     if suffix is None:
@@ -100,12 +105,27 @@ async def voice(
     if len(data) > MAX_AUDIO_BYTES:
         raise HTTPException(413, "Слишком большой файл")
     try:
-        transcript = await state.recognizer.transcribe(data, suffix)
+        return await state.recognizer.transcribe(data, suffix)
     except AudioTooLongError as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@app.post("/api/transcribe")
+async def transcribe(audio: UploadFile) -> dict[str, Any]:
+    """Speech to text only, so the UI can show the recognized phrase before the answer is ready."""
+    transcript = await _transcribe(audio)
+    return {"transcript": transcript.text, "asr_latency_s": transcript.latency_s}
+
+
+@app.post("/api/voice")
+async def voice(
+    audio: UploadFile, response: Response, user: Annotated[str | None, Cookie(alias=USER_COOKIE)] = None
+) -> dict[str, Any]:
+    received_at = datetime.now(UTC)  # before ASR: relative dates count from when the user spoke
+    transcript = await _transcribe(audio)
     if not transcript.text:
         return {"transcript": "", "asr_latency_s": transcript.latency_s, "text": "Не расслышал, повторите."}
-    reply = await _answer(_user_id(response, user), transcript.text)
+    reply = await _answer(_user_id(response, user), transcript.text, received_at)
     return {"transcript": transcript.text, "asr_latency_s": transcript.latency_s, **reply}
 
 

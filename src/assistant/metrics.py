@@ -24,6 +24,10 @@ REQUEST_COST = Histogram(
 )
 TOOL_CALLS = Counter("assistant_tool_calls_total", "MCP tool calls made by the agent", ["tool"])
 AGENT_ERRORS = Counter("assistant_agent_errors_total", "Failed agent requests", ["reason"])
+AGENT_RETRIES = Counter("assistant_agent_retries_total", "Agent requests retried by a guard", ["reason"])
+# Audio seconds are the billing unit of cloud ASR and the load measure of local ASR.
+ASR_AUDIO_SECONDS = Counter("assistant_asr_audio_seconds_total", "Seconds of recognized audio", ["backend"])
+ASR_ERRORS = Counter("assistant_asr_errors_total", "Failed ASR provider calls", ["backend"])
 
 
 def quantiles(values: Sequence[float]) -> dict[str, float]:

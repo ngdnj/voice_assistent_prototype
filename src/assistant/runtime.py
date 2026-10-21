@@ -31,12 +31,14 @@ async def open_assistant(settings: Settings) -> AsyncIterator[Assistant]:
     if settings.redis_url:
         redis = Redis.from_url(settings.redis_url, decode_responses=True)
         await redis.ping()  # fail fast instead of silently losing dialog context
-        history = RedisChatHistory(redis, settings.history_max_turns, settings.history_ttl_s)
+        history = RedisChatHistory(
+            redis, settings.history_max_turns, settings.history_ttl_s, settings.history_max_tokens
+        )
     else:
-        history = InMemoryChatHistory(settings.history_max_turns)
+        history = InMemoryChatHistory(settings.history_max_turns, settings.history_max_tokens)
     try:
         async with _mcp_client(settings) as client:
-            yield Assistant(model, client, history, settings.tz, Pricing(*settings.pricing))
+            yield Assistant(model, client, history, Pricing(*settings.pricing))
     finally:
         if redis is not None:
             await redis.aclose()

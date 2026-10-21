@@ -16,3 +16,4 @@ evals/reports/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+certs/

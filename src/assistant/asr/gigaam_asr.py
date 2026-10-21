@@ -11,10 +11,10 @@ import time
 from typing import Any
 
 from assistant import metrics
-from assistant.asr.base import AudioTooLongError, Transcript
+from assistant.asr.base import MAX_DURATION_S, AudioTooLongError, Transcript
 
-MAX_DURATION_S = 25.0
 SAMPLE_RATE = 16000
+BACKEND = "gigaam"
 
 
 class GigaAMRecognizer:
@@ -35,7 +35,10 @@ class GigaAMRecognizer:
         with self._lock:
             self._load()
 
-    def _transcribe_file(self, path: str) -> str:
+    async def aclose(self) -> None:
+        """Nothing to release: the model lives as long as the process."""
+
+    def _transcribe_file(self, path: str) -> tuple[str, float]:
         from gigaam.preprocess import load_audio
 
         duration_s = load_audio(path).shape[-1] / SAMPLE_RATE
@@ -43,7 +46,7 @@ class GigaAMRecognizer:
             raise AudioTooLongError(f"Запись {duration_s:.0f} с, максимум {MAX_DURATION_S:.0f} с")
         with self._lock:
             result = self._load().transcribe(path)
-        return str(getattr(result, "text", result)).strip()
+        return str(getattr(result, "text", result)).strip(), duration_s
 
     async def transcribe(self, audio: bytes, suffix: str) -> Transcript:
         started = time.perf_counter()
@@ -51,9 +54,10 @@ class GigaAMRecognizer:
         try:
             with os.fdopen(fd, "wb") as file:
                 file.write(audio)
-            text = await asyncio.to_thread(self._transcribe_file, path)
+            text, audio_s = await asyncio.to_thread(self._transcribe_file, path)
         finally:
             os.unlink(path)
         latency = time.perf_counter() - started
         metrics.STAGE_LATENCY.labels("asr").observe(latency)
-        return Transcript(text=text, latency_s=latency)
+        metrics.ASR_AUDIO_SECONDS.labels(BACKEND).inc(audio_s)
+        return Transcript(text=text, latency_s=latency, audio_s=audio_s)

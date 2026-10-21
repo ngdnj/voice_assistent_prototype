@@ -19,6 +19,11 @@ _MARKDOWN_RE = re.compile(r"\*\*|__|^#+\s|^\s*[-*•]\s|`", re.MULTILINE)
 _EMOJI_RE = re.compile("[\U0001f300-\U0001faff☀-➿]")
 
 
+# "через два часа" instead of a clock time: the user hears no moment to check, and it hides a wrong day.
+_RELATIVE_TIME_RE = re.compile(r"\bчерез\s+(?:[\wё-]+\s+)?(?:полчаса|час|минут)", re.IGNORECASE)
+_CLOCK_RE = re.compile(r"\b\d{1,2}:\d{2}\b")
+
+
 def speech_issues(answer: str) -> list[str]:
     issues = []
     if _MARKDOWN_RE.search(answer):
@@ -27,6 +32,8 @@ def speech_issues(answer: str) -> list[str]:
         issues.append("в ответе переносы строк")
     if _EMOJI_RE.search(answer):
         issues.append("в ответе эмодзи")
+    if _RELATIVE_TIME_RE.search(answer) and not _CLOCK_RE.search(answer):
+        issues.append("время названо относительно («через …»), а не по часам")
     return issues
 
 
@@ -60,16 +67,37 @@ def at(key: str, expected_iso: str) -> Check:
     return check
 
 
-def on_date(key: str, expected: str) -> Check:
-    expected_date = date.fromisoformat(expected)
+def near(key: str, expected_iso: str, tolerance: timedelta = timedelta(minutes=1)) -> Check:
+    """Moment within a tolerance: "через 2 часа" may keep or drop the seconds of "now"."""
+    expected = datetime.fromisoformat(expected_iso)
 
     def check(args: dict[str, Any]) -> str | None:
         actual = _parse(args.get(key))
         if actual is None:
             return f"{key}={args.get(key)!r}: не ISO 8601 с часовым поясом"
-        return (
-            None if actual.date() == expected_date else f"{key}: дата {actual.date()}, ожидалась {expected}"
-        )
+        ok = abs(actual - expected) <= tolerance
+        return None if ok else f"{key}={actual.isoformat()}, ожидалось около {expected_iso}"
+
+    return check
+
+
+def one_of(key: str, *allowed: Any) -> Check:
+    def check(args: dict[str, Any]) -> str | None:
+        return None if args.get(key) in allowed else f"{key}={args.get(key)!r}, ожидалось одно из {allowed}"
+
+    return check
+
+
+def on_date(key: str, *expected: str) -> Check:
+    """Local date of the moment is one of `expected`: several when the phrase is ambiguous."""
+    expected_dates = {date.fromisoformat(e) for e in expected}
+
+    def check(args: dict[str, Any]) -> str | None:
+        actual = _parse(args.get(key))
+        if actual is None:
+            return f"{key}={args.get(key)!r}: не ISO 8601 с часовым поясом"
+        wanted = " или ".join(expected)
+        return None if actual.date() in expected_dates else f"{key}: дата {actual.date()}, ожидалась {wanted}"
 
     return check
 
@@ -107,11 +135,11 @@ def types_include(*types: str) -> Check:
 
 
 def mentions(key: str, *words: str) -> Check:
-    """Free-text argument contains each word stem (case-insensitive)."""
+    """Free-text argument contains each word stem (case-insensitive); "a|b" accepts any alternative."""
 
     def check(args: dict[str, Any]) -> str | None:
         text = str(args.get(key) or "").lower()
-        missing = [w for w in words if w.lower() not in text]
+        missing = [w for w in words if not any(alt.lower() in text for alt in w.split("|"))]
         return f"{key}={text!r}, нет {missing}" if missing else None
 
     return check
@@ -126,4 +154,10 @@ class Expect:
 
     tool: str | None
     checks: list[Check] = field(default_factory=list)
+    # Each entry must occur in the answer; "a|b" accepts any of the alternatives.
     answer_mentions: list[str] = field(default_factory=list)
+    # Tools that must not be called on the last turn (by default nothing may be created or deleted
+    # when tool=None).
+    forbid: list[str] = field(default_factory=list)
+    # Several records in one phrase: each group of checks must match some call of `tool`.
+    also: list[list[Check]] = field(default_factory=list)

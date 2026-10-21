@@ -16,9 +16,24 @@ from mcp.types import TextContent, Tool
 USER_ID_PARAM = "user_id"
 
 
-def _schema_without_user_id(schema: dict[str, Any]) -> dict[str, Any]:
+def _without_nullable_unions(prop: dict[str, Any]) -> dict[str, Any]:
+    """`anyOf: [X, null]` -> `X`. GigaChat function calling rejects unions; the field stays optional."""
+    variants = prop.get("anyOf")
+    if not isinstance(variants, list):
+        return prop
+    non_null = [v for v in variants if v.get("type") != "null"]
+    if len(non_null) != 1 or len(non_null) == len(variants):
+        return prop
+    simplified = {**{k: v for k, v in prop.items() if k not in ("anyOf", "default")}, **non_null[0]}
+    return simplified
+
+
+def _llm_schema(schema: dict[str, Any]) -> dict[str, Any]:
     stripped = copy.deepcopy(schema)
-    stripped.get("properties", {}).pop(USER_ID_PARAM, None)
+    properties = stripped.get("properties", {})
+    properties.pop(USER_ID_PARAM, None)
+    for name, prop in properties.items():
+        properties[name] = _without_nullable_unions(prop)
     if USER_ID_PARAM in stripped.get("required", []):
         stripped["required"] = [p for p in stripped["required"] if p != USER_ID_PARAM]
     return stripped
@@ -38,7 +53,7 @@ def _make_tool(client: Client[Any], tool: Tool, user_id: str) -> BaseTool:
     return StructuredTool(
         name=tool.name,
         description=tool.description or "",
-        args_schema=_schema_without_user_id(tool.input_schema),
+        args_schema=_llm_schema(tool.input_schema),
         coroutine=call,
     )
 

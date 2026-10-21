@@ -7,13 +7,15 @@ import argparse
 import asyncio
 import json
 import sys
+from datetime import UTC, datetime
 
 from assistant.config import get_settings
 from assistant.runtime import open_assistant
 
 
 async def chat(user_id: str, debug: bool) -> None:
-    async with open_assistant(get_settings()) as assistant:
+    settings = get_settings()
+    async with open_assistant(settings) as assistant:
         print("Пишите запрос. Пустая строка или Ctrl+C — выход.")
         while True:
             try:
@@ -22,7 +24,9 @@ async def chat(user_id: str, debug: bool) -> None:
                 break
             if not text:
                 break
-            reply = await assistant.handle(user_id, text)
+            reply = await assistant.handle(
+                user_id, text, reference_time=datetime.now(UTC), timezone=settings.timezone
+            )
             if debug:
                 for call in reply.tool_calls:
                     print(f"  ↳ {call.name}({json.dumps(call.args, ensure_ascii=False)})")

@@ -11,7 +11,8 @@ from langchain_core.messages import BaseMessage
 from assistant.events.storage import EventStorage
 from assistant.mcp_server.server import build_server
 
-TZ = ZoneInfo("Europe/Moscow")
+TZ_NAME = "Europe/Moscow"
+TZ = ZoneInfo(TZ_NAME)
 # Monday.
 NOW = datetime(2026, 10, 19, 12, 0, 0, tzinfo=TZ)
 

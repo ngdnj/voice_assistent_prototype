@@ -143,6 +143,29 @@ class EventStorage:
         row = self._conn.execute("SELECT * FROM events WHERE id = ?", (cursor.lastrowid,)).fetchone()
         return self._to_event(row)
 
+    def delete(self, user_id: str, event_id: int) -> Event | None:
+        """Delete the user's record. Returns it, or None if there is no such record of this user."""
+        row = self._conn.execute(
+            "SELECT * FROM events WHERE id = ? AND user_id = ?", (event_id, user_id)
+        ).fetchone()
+        if row is None:
+            return None
+        with self._conn:
+            self._conn.execute("DELETE FROM events WHERE id = ? AND user_id = ?", (event_id, user_id))
+        return self._to_event(row)
+
+    def find_same(
+        self, user_id: str, event_type: EventType, name: str, when: datetime | None
+    ) -> Event | None:
+        """An existing record with the same type, name (case-insensitive) and time, if any."""
+        rows = self._conn.execute(
+            "SELECT * FROM events WHERE user_id = ? AND event_type = ? AND ts_utc IS ?",
+            (user_id, event_type.value, _to_utc_text(when) if when else None),
+        ).fetchall()
+        # SQLite lower() is ASCII-only, so Cyrillic names are compared in Python.
+        wanted = name.strip().casefold()
+        return next((self._to_event(r) for r in rows if r["name"].strip().casefold() == wanted), None)
+
     def list_between(
         self,
         user_id: str,

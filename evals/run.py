@@ -1,11 +1,13 @@
-"""Run eval cases against the real LLM and report accuracy, latency and cost.
+"""Run eval cases against the real LLM and report accuracy, latency, tokens and cost.
 
     uv run python -m evals.run                       # all cases
+    uv run python -m evals.run --split holdout       # final measurement only
+    uv run python -m evals.run --category search     # one request class
     uv run python -m evals.run -k today search_      # cases whose id starts with a prefix
     uv run python -m evals.run --repeat 3 --temperature 0.3
 
 Each case gets a fresh in-memory storage and history, so cases are independent.
-A JSON report is written to evals/reports/ for comparing prompt/model versions.
+A JSON report is written to evals/reports/; `python -m evals.summary` builds the model table.
 """
 
 import argparse
@@ -15,9 +17,11 @@ import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
+from zoneinfo import ZoneInfo
 
 from fastmcp import Client
+from langchain_core.language_models import BaseChatModel
 
 from assistant.config import Settings, get_settings
 from assistant.events.models import EventType
@@ -26,57 +30,80 @@ from assistant.llm.agent import AgentReply, Assistant, Pricing
 from assistant.llm.history import InMemoryChatHistory
 from assistant.llm.model import build_chat_model
 from assistant.mcp_server.server import build_server
-from assistant.metrics import quantiles
-from evals.cases import CASES, NOW, TZ, Case
-from evals.checks import speech_issues
+from evals.cases import CASES, Case, Category, Split
+from evals.checks import Check, speech_issues
+from evals.stats import summarize
 
 REPORTS_DIR = Path(__file__).parent / "reports"
+INFRA_ATTEMPTS = 3
+# Without an explicit expectation nothing may change the user's records.
+MUTATING_TOOLS = ("create_event", "delete_event")
 
 
 @dataclass
 class CaseResult:
     id: str
     category: str
+    split: str
     passed: bool
     errors: list[str]
     answer: str
     tool_calls: list[dict[str, Any]]
     latency_s: float
     cost_rub: float
-    tokens: int
+    input_tokens: int
+    output_tokens: int
+    retried: bool = False
+    # API/network failure, not a model mistake; excluded from accuracy.
+    infra_error: bool = False
+    timezone: str = ""
     turns: list[str] = field(default_factory=list)
+
+
+def _first_error(checks: list[Check], args: dict[str, Any]) -> str | None:
+    return next((e for check in checks if (e := check(args))), None)
 
 
 def _evaluate(case: Case, reply: AgentReply) -> list[str]:
     expect = case.expect
     errors: list[str] = []
-    if expect.tool is None:
-        created = [c for c in reply.tool_calls if c.name == "create_event"]
-        if created:
-            errors.append(f"не должно быть create_event, вызвано: {created[-1].args}")
-    else:
+    forbidden = set(expect.forbid) or (set(MUTATING_TOOLS) if expect.tool is None else set())
+    for call in reply.tool_calls:
+        if call.name in forbidden:
+            errors.append(f"не должно быть {call.name}, вызвано: {call.args}")
+    if expect.tool is not None:
         calls = [c for c in reply.tool_calls if c.name == expect.tool]
         if not calls:
             names = [c.name for c in reply.tool_calls] or "нет вызовов"
             errors.append(f"ожидался {expect.tool}, вызвано: {names}")
         else:
             errors += [e for check in expect.checks if (e := check(calls[-1].args))]
+            for group in expect.also:
+                misses = [_first_error(group, c.args) for c in calls]
+                if all(misses):
+                    errors.append(f"нет подходящего {expect.tool}: {misses[0]}")
     answer = reply.text.lower()
-    errors += [f"в ответе нет «{w}»" for w in expect.answer_mentions if w.lower() not in answer]
+    for words in expect.answer_mentions:  # "a|b" means any of the alternatives
+        if not any(w.lower() in answer for w in words.split("|")):
+            errors.append(f"в ответе нет «{words}»")
     errors += speech_issues(reply.text)
     return errors
 
 
-async def _run_case(case: Case, settings: Settings) -> CaseResult:
-    storage = EventStorage(":memory:", TZ)
+async def _run_case(case: Case, settings: Settings, model: BaseChatModel) -> CaseResult:
+    tz = ZoneInfo(case.timezone)
+    storage = EventStorage(":memory:", tz)
     for seed in case.seed:
         when = datetime.fromisoformat(seed.when) if seed.when else None
         storage.create("eval", EventType(seed.event_type), seed.name, seed.description, when)
 
-    model = build_chat_model(settings)
-    async with Client(build_server(storage, TZ)) as client:
-        assistant = Assistant(model, client, InMemoryChatHistory(10), TZ, Pricing(*settings.pricing))
-        replies = [await assistant.handle("eval", turn, now=NOW) for turn in case.turns]
+    async with Client(build_server(storage, tz)) as client:
+        assistant = Assistant(model, client, InMemoryChatHistory(10), Pricing(*settings.pricing))
+        # Every turn keeps the case's reference time, like a retried job keeps the original one.
+        replies = [
+            await assistant.handle("eval", turn, reference_time=case.now, timezone=case.timezone)
+            for turn in case.turns
+        ]
     storage.close()
 
     last = replies[-1]
@@ -84,42 +111,71 @@ async def _run_case(case: Case, settings: Settings) -> CaseResult:
     return CaseResult(
         id=case.id,
         category=case.category,
+        split=case.split,
         passed=not errors,
         errors=errors,
         answer=last.text,
         tool_calls=[{"name": c.name, "args": c.args} for c in last.tool_calls],
         latency_s=sum(r.latency_s for r in replies),
         cost_rub=sum(r.cost_rub for r in replies),
-        tokens=sum(r.input_tokens + r.output_tokens for r in replies),
+        input_tokens=sum(r.input_tokens for r in replies),
+        output_tokens=sum(r.output_tokens for r in replies),
+        retried=any(r.retried for r in replies),
+        timezone=case.timezone,
         turns=case.turns,
     )
 
 
-async def _run_safe(case: Case, settings: Settings) -> CaseResult:
-    try:
-        return await _run_case(case, settings)
-    except Exception as exc:  # one broken case must not stop the whole run
-        return CaseResult(case.id, case.category, False, [f"{type(exc).__name__}: {exc}"], "", [], 0, 0, 0)
+async def _run_safe(case: Case, settings: Settings, model: BaseChatModel) -> CaseResult:
+    # Model mistakes never raise: an exception here is an API or network failure.
+    error = ""
+    for attempt in range(INFRA_ATTEMPTS):
+        try:
+            return await _run_case(case, settings, model)
+        except Exception as exc:  # one broken case must not stop the whole run
+            error = f"{type(exc).__name__}: {str(exc)[:200]}"
+            await asyncio.sleep(2 * (attempt + 1))
+    return CaseResult(
+        case.id, case.category, case.split, False, [error], "", [], 0, 0, 0, 0, infra_error=True
+    )
 
 
-def _print_report(results: list[CaseResult]) -> None:
+def _fmt(stats: dict[str, float], digits: int) -> str:
+    return (
+        f"mean={stats['mean']:.{digits}f} median={stats['median']:.{digits}f} p95={stats['p95']:.{digits}f}"
+    )
+
+
+def _print_summary(title: str, summary: dict[str, Any]) -> None:
+    print(f"\n== {title}: {summary['passed']}/{summary['n']} ({summary['accuracy']:.0%})")
+    for category, counts in summary["by_category"].items():
+        print(f"   {category:<10} {counts['passed']}/{counts['n']}")
+    if summary["infra_errors"]:
+        print(f"   сбои API/сети, не учтены в точности: {summary['infra_errors']}")
+    print(f"   латентность, с:    {_fmt(summary['latency_s'], 2)}")
+    print(f"   стоимость, ₽:      {_fmt(summary['cost_rub'], 3)}")
+    print(f"   токены вход:       {_fmt(summary['input_tokens'], 0)}")
+    print(f"   токены выход:      {_fmt(summary['output_tokens'], 0)}")
+
+
+def _print_report(results: list[CaseResult], summaries: dict[str, dict[str, Any]]) -> None:
     for r in results:
-        mark = "PASS" if r.passed else "FAIL"
-        print(f"[{mark}] {r.id:<32} {r.latency_s:5.1f}s {r.cost_rub:6.3f}₽  {r.answer[:70]!r}")
+        mark = ("ERR " if r.infra_error else "PASS" if r.passed else "FAIL") + ("↻" if r.retried else " ")
+        print(f"[{mark}]{r.id:<34} {r.latency_s:5.1f}s {r.cost_rub:6.3f}₽  {r.answer[:70]!r}")
         for error in r.errors:
             print(f"        - {error}")
-    print()
-    by_category: dict[str, list[CaseResult]] = {}
+    by_case: dict[str, list[CaseResult]] = {}
     for r in results:
-        by_category.setdefault(r.category, []).append(r)
-    for category, items in sorted(by_category.items()):
-        print(f"{category:<10} {sum(i.passed for i in items)}/{len(items)}")
-    passed = sum(r.passed for r in results)
-    lat = quantiles([r.latency_s for r in results])
-    cost = quantiles([r.cost_rub for r in results])
-    print(f"\nИтого: {passed}/{len(results)} ({passed / len(results):.0%})")
-    print(f"Латентность, с: p50={lat['p50']:.2f} p95={lat['p95']:.2f}")
-    print(f"Стоимость, ₽:   p50={cost['p50']:.3f} p95={cost['p95']:.3f}")
+        if not r.infra_error:
+            by_case.setdefault(r.id, []).append(r)
+    flaky = {cid: items for cid, items in by_case.items() if 0 < sum(i.passed for i in items) < len(items)}
+    if flaky:
+        print("\nНестабильные кейсы:")
+        for cid, items in flaky.items():
+            print(f"  {cid}: {sum(i.passed for i in items)}/{len(items)}")
+    for title, summary in summaries.items():
+        _print_summary(title, summary)
+    print(f"\nСтоимость прогона, ₽: {sum(r.cost_rub for r in results):.2f}")
 
 
 async def main() -> int:
@@ -129,32 +185,52 @@ async def main() -> int:
     parser.add_argument(
         "-k", nargs="*", default=[], help="run only cases whose id starts with these prefixes"
     )
+    parser.add_argument("--split", choices=[*get_args(Split), "all"], default="all")
+    parser.add_argument("--category", nargs="*", choices=get_args(Category), default=[])
     parser.add_argument("--repeat", type=int, default=1, help="run each case N times to measure stability")
     parser.add_argument("--temperature", type=float, help="override LLM_TEMPERATURE")
     parser.add_argument("--model", help="override the model of the active LLM_PROVIDER")
-    parser.add_argument("--concurrency", type=int, default=4, help="parallel cases (mind API rate limits)")
+    parser.add_argument("--concurrency", type=int, default=2, help="parallel cases (mind API rate limits)")
+    parser.add_argument("--price-in", type=float, help="RUB per 1000 input tokens for this model")
+    parser.add_argument("--price-out", type=float, help="RUB per 1000 output tokens for this model")
     args = parser.parse_args()
 
     overrides: dict[str, Any] = {}
     if args.temperature is not None:
         overrides["llm_temperature"] = args.temperature
+    if args.price_in is not None:
+        overrides["llm_price_input_rub_per_1k"] = args.price_in
+    if args.price_out is not None:
+        overrides["llm_price_output_rub_per_1k"] = args.price_out
     settings = get_settings().model_copy(update=overrides)
     if args.model:
         settings = settings.with_llm_model(args.model)
 
-    cases = [c for c in CASES if not args.k or any(c.id.startswith(p) for p in args.k)]
+    cases = [
+        c
+        for c in CASES
+        if (not args.k or any(c.id.startswith(p) for p in args.k))
+        and (args.split == "all" or c.split == args.split)
+        and (not args.category or c.category in args.category)
+    ]
     if not cases:
         print("Нет кейсов под фильтр", file=sys.stderr)
         return 2
 
+    # One model (and one OAuth token) for the whole run: per-case clients hit the auth rate limit.
+    model = build_chat_model(settings)
     semaphore = asyncio.Semaphore(args.concurrency)
 
     async def bounded(case: Case) -> CaseResult:
         async with semaphore:
-            return await _run_safe(case, settings)
+            return await _run_safe(case, settings, model)
 
     results = await asyncio.gather(*(bounded(c) for c in cases for _ in range(args.repeat)))
-    _print_report(results)
+    rows = [asdict(r) for r in results]
+    summaries = {split: summarize(r for r in rows if r["split"] == split) for split in get_args(Split)}
+    summaries = {k: v for k, v in summaries.items() if v["n"] or v["infra_errors"]}
+    summaries["all"] = summarize(rows)
+    _print_report(results, summaries)
 
     REPORTS_DIR.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -163,10 +239,13 @@ async def main() -> int:
         "model": settings.llm_model,
         "temperature": settings.llm_temperature,
         "repeat": args.repeat,
-        "results": [asdict(r) for r in results],
+        "filter": {"split": args.split, "category": args.category, "k": args.k},
+        "pricing_rub_per_1k": {"input": settings.pricing[0], "output": settings.pricing[1]},
+        "summary": summaries,
+        "results": rows,
     }
     model_slug = settings.llm_model.replace("/", "_")
-    path = REPORTS_DIR / f"{stamp}-{model_slug}-t{settings.llm_temperature}.json"
+    path = REPORTS_DIR / f"{stamp}-{model_slug}-t{settings.llm_temperature}-{args.split}.json"
     path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\nОтчёт: {path}")
     return 0 if all(r.passed for r in results) else 1

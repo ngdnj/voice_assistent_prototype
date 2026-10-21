@@ -37,6 +37,17 @@
   button#mic.recording { background: var(--rec); border-color: var(--rec); color: #fff; }
   button:disabled { opacity: .5; cursor: default; }
   .hint { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
+  .msg.status { color: var(--muted); font-style: italic; display: flex; align-items: center; gap: 8px; }
+  .msg.status.recording { color: var(--rec); font-style: normal; }
+  .dots { display: inline-flex; gap: 3px; }
+  .dots i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .3;
+            animation: blink 1.2s infinite; }
+  .dots i:nth-child(2) { animation-delay: .2s; }
+  .dots i:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 40% { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .dots i { animation: none; opacity: .7; } }
+  .elapsed { font-variant-numeric: tabular-nums; font-style: normal; font-size: 13px; }
+  .msg .meta { margin-top: 4px; font-size: 12px; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -44,7 +55,6 @@
   <header>
     <h1>Голосовой ассистент · демо ML</h1>
     <div>
-      <label><input type="checkbox" id="speak" checked> озвучивать</label>
       <label><input type="checkbox" id="showDebug" checked> отладка</label>
       <button type="button" id="reset">Сброс диалога</button>
     </div>
@@ -86,50 +96,94 @@ function debugText(r) {
   return lines.join("\n");
 }
 
-function speak(text) {
-  if (!document.getElementById("speak").checked || !("speechSynthesis" in window)) return;
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = "ru-RU";
-  speechSynthesis.cancel();
-  speechSynthesis.speak(u);
+// A temporary bubble that shows what the assistant is doing right now, with a running timer.
+function showStatus(text, extraClass = "") {
+  const div = document.createElement("div");
+  div.className = "msg status " + extraClass;
+  div.setAttribute("role", "status");
+  const label = document.createElement("span");
+  label.textContent = text;
+  const dots = document.createElement("span");
+  dots.className = "dots";
+  dots.innerHTML = "<i></i><i></i><i></i>";
+  const elapsed = document.createElement("span");
+  elapsed.className = "elapsed";
+  div.append(label, dots, elapsed);
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+  const started = performance.now();
+  const timer = setInterval(() => {
+    elapsed.textContent = ((performance.now() - started) / 1000).toFixed(1) + " с";
+  }, 100);
+  return {
+    set(newText) { label.textContent = newText; },
+    done() { clearInterval(timer); div.remove(); },
+  };
 }
 
-async function call(url, options) {
-  const busy = [mic, send];
-  busy.forEach(b => b.disabled = true);
-  try {
-    const res = await fetch(url, options);
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.detail || `Ошибка ${res.status}`);
-    return body;
-  } finally {
-    busy.forEach(b => b.disabled = false);
-  }
+function setBusy(busy) {
+  send.disabled = busy;
+  textInput.disabled = busy;
+  if (!recorder) mic.disabled = busy;
 }
 
-async function handle(promise) {
+async function request(url, options) {
+  const res = await fetch(url, options);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.detail || `Ошибка ${res.status}`);
+  return body;
+}
+
+async function ask(text, asrLatency) {
+  const status = showStatus("Обрабатываю запрос");
   try {
-    const r = await promise;
-    if (r.transcript) add("user", r.transcript);
-    add("assistant", r.text, debugText(r));
-    speak(r.text);
+    const r = await request("/api/chat", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({text}),
+    });
+    status.done();
+    add("assistant", r.text, debugText({...r, asr_latency_s: asrLatency}));
   } catch (e) {
+    status.done();
     add("assistant error", e.message);
   }
 }
 
-document.getElementById("form").addEventListener("submit", e => {
+document.getElementById("form").addEventListener("submit", async e => {
   e.preventDefault();
   const text = textInput.value.trim();
   if (!text) return;
   textInput.value = "";
   add("user", text);
-  handle(call("/api/chat", {
-    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({text}),
-  }));
+  setBusy(true);
+  await ask(text);
+  setBusy(false);
+  textInput.focus();
 });
 
+async function recognizeAndAsk(blob, filename) {
+  setBusy(true);
+  const status = showStatus("Распознаю речь");
+  try {
+    const form = new FormData();
+    form.append("audio", blob, filename);
+    const t = await request("/api/transcribe", {method: "POST", body: form});
+    status.done();
+    if (!t.transcript) {
+      add("assistant", "Не расслышал, повторите, пожалуйста.");
+      return;
+    }
+    add("user", t.transcript);
+    await ask(t.transcript, t.asr_latency_s);
+  } catch (e) {
+    status.done();
+    add("assistant error", e.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
 let recorder = null;
+let recordingStatus = null;
 mic.addEventListener("click", async () => {
   if (recorder) { recorder.stop(); return; }
   let stream;
@@ -145,14 +199,16 @@ mic.addEventListener("click", async () => {
   recorder.onstop = () => {
     stream.getTracks().forEach(t => t.stop());
     mic.classList.remove("recording");
+    mic.textContent = "🎙";
+    recordingStatus.done();
     const type = recorder.mimeType.split(";")[0] || "audio/webm";
     recorder = null;
-    const form = new FormData();
-    form.append("audio", new Blob(chunks, {type}), "voice" + (type.includes("mp4") ? ".m4a" : ".webm"));
-    handle(call("/api/voice", {method: "POST", body: form}));
+    recognizeAndAsk(new Blob(chunks, {type}), "voice" + (type.includes("mp4") ? ".m4a" : ".webm"));
   };
   recorder.start();
   mic.classList.add("recording");
+  mic.textContent = "⏹";
+  recordingStatus = showStatus("Идёт запись, нажмите ⏹, чтобы закончить", "recording");
   setTimeout(() => recorder && recorder.stop(), 25000);
 });
 
