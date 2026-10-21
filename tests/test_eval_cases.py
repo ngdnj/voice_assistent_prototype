@@ -1,7 +1,7 @@
 from collections import Counter
 from zoneinfo import ZoneInfo
 
-from assistant.llm.agent import AgentReply, ToolCall
+from app.agent.agent import AgentReply, ToolCall
 from evals.cases import CASES, Case
 from evals.checks import Expect, at, mentions, on_date
 from evals.run import _evaluate

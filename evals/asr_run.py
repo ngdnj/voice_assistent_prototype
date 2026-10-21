@@ -29,9 +29,10 @@ from typing import Any
 
 import psutil
 
-from assistant.asr import SpeechRecognizer, build_recognizer
-from assistant.config import Settings, get_settings
-from assistant.metrics import quantiles
+from app.asr.base import SpeechRecognizer
+from app.asr.factory import build_recognizer
+from app.config import Settings, get_settings
+from app.metrics import quantiles
 from evals.asr_metrics import Score, corpus_rates, score
 
 PHRASES_FILE = Path(__file__).parent / "asr_phrases.tsv"

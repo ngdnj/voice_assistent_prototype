@@ -28,7 +28,10 @@ LIST_PRICES_RUB_PER_1M: dict[str, tuple[float, float]] = {
 PRICE_SOURCE = "Cloud.ru, прайс v260915, с НДС"
 
 
-def _is_full_set(report: dict[str, Any]) -> bool:
+def _is_full_set(report: Any) -> bool:
+    """LLM eval report over the whole set; other JSON in the folder (e.g. ASR runs) is skipped."""
+    if not isinstance(report, dict):
+        return False
     flt = report.get("filter", {})
     return "summary" in report and not flt.get("k") and not flt.get("category")
 

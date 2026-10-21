@@ -1,11 +1,23 @@
 from datetime import timedelta
 
-from assistant.llm.agent import AgentReply, ToolCall
+from app.agent.agent import AgentReply, ToolCall
 from evals.cases import CASES
-from evals.checks import Expect, at, covers, mentions, near, on_date, speech_issues, types_include
+from evals.checks import (
+    Expect,
+    at,
+    covers,
+    due_on,
+    mentions,
+    near,
+    no_time,
+    on_date,
+    on_day,
+    speech_issues,
+    types_include,
+)
 from evals.run import _evaluate
 
-DAY = covers("2026-10-19T00:00:00+03:00", "2026-10-19T23:59:59+03:00", max_extra=timedelta(hours=1))
+DAY = covers("2026-10-19T00:00:00+03:00", "2026-10-20T00:00:00+03:00", max_extra=timedelta(hours=1))
 
 
 def test_at_compares_moments_across_offsets() -> None:
@@ -21,8 +33,8 @@ def test_on_date() -> None:
 
 
 def test_covers_rejects_short_and_too_wide_ranges() -> None:
-    ok = {"start_time": "2026-10-19T00:00:00+03:00", "end_time": "2026-10-19T23:59:59+03:00"}
-    short = {"start_time": "2026-10-19T12:00:00+03:00", "end_time": "2026-10-19T23:59:59+03:00"}
+    ok = {"start_time": "2026-10-19T00:00:00+03:00", "end_time": "2026-10-20T00:00:00+03:00"}
+    short = {"start_time": "2026-10-19T12:00:00+03:00", "end_time": "2026-10-20T00:00:00+03:00"}
     wide = {"start_time": "2026-10-19T00:00:00+03:00", "end_time": "2026-10-26T00:00:00+03:00"}
     assert DAY(ok) is None
     assert DAY(short) is not None
@@ -30,8 +42,9 @@ def test_covers_rejects_short_and_too_wide_ranges() -> None:
 
 
 def test_types_include_treats_empty_list_as_all() -> None:
-    assert types_include("meeting")({"event_type": []}) is None
-    assert types_include("meeting")({"event_type": ["task"]}) is not None
+    assert types_include("meeting")({"event_types": []}) is None
+    assert types_include("meeting")({}) is None
+    assert types_include("meeting")({"event_types": ["task"]}) is not None
 
 
 def test_mentions_is_case_insensitive() -> None:
@@ -47,15 +60,41 @@ def test_evaluate_clarification_case_fails_when_event_created() -> None:
 
 
 def test_all_cases_reference_known_tools() -> None:
-    known = {None, "create_event", "get_event", "get_event_by_query", "delete_event"}
+    known = {None, "create_event", "get_events_by_period", "get_event_by_query", "delete_event"}
     assert len({c.id for c in CASES}) == len(CASES)
     for case in CASES:
         assert isinstance(case.expect, Expect)
         assert case.expect.tool in known, case.id
 
 
-def test_covers_accepts_end_one_minute_early() -> None:
-    assert DAY({"start_time": "2026-10-19T00:00:00+03:00", "end_time": "2026-10-19T23:59:00+03:00"}) is None
+def test_covers_is_half_open_and_rejects_inclusive_end() -> None:
+    """AGENTS §7: a day is [00:00, next 00:00); 23:59:59 loses the last second of the day."""
+    assert (
+        DAY({"start_time": "2026-10-19T00:00:00+03:00", "end_time": "2026-10-19T23:59:59+03:00"}) is not None
+    )
+    assert (
+        DAY({"start_time": "2026-10-19T00:00:00+03:00", "end_time": "2026-10-19T23:59:00+03:00"}) is not None
+    )
+
+
+def test_due_on_requires_date_without_invented_time() -> None:
+    check = due_on("2026-10-23")
+    assert check({"date": "2026-10-23"}) is None
+    assert check({"datetime": "2026-10-23T23:59:00+03:00"}) is not None  # time the user did not say
+    assert check({"date": "2026-10-23", "datetime": "2026-10-23T00:00:00+03:00"}) is not None
+    assert check({"date": "2026-10-24"}) is not None
+
+
+def test_on_day_accepts_date_or_moment() -> None:
+    check = on_day("2026-10-25")
+    assert check({"date": "2026-10-25"}) is None
+    assert check({"datetime": "2026-10-25T12:00:00+03:00"}) is None
+    assert check({"date": "2026-10-26"}) is not None
+
+
+def test_no_time() -> None:
+    assert no_time()({"name": "x"}) is None
+    assert no_time()({"date": "2026-10-23"}) is not None
 
 
 def test_speech_issues() -> None:
@@ -82,7 +121,7 @@ def test_offsets_cross_midnight() -> None:
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
-    from assistant.llm.prompts import render_system_prompt
+    from app.llm.prompts import render_system_prompt
 
     moscow = ZoneInfo("Europe/Moscow")
     prompt = render_system_prompt(datetime(2026, 10, 19, 22, 23, 55, tzinfo=moscow), moscow)

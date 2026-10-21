@@ -10,8 +10,8 @@ import threading
 import time
 from typing import Any
 
-from assistant import metrics
-from assistant.asr.base import MAX_DURATION_S, AudioTooLongError, Transcript
+from app import metrics
+from app.asr.base import MAX_DURATION_S, AudioTooLongError, Transcript
 
 SAMPLE_RATE = 16000
 BACKEND = "gigaam"

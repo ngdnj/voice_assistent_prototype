@@ -42,44 +42,44 @@
 
 ## 2. Что уже сделано (ветка `feature/ml-llm-asr`)
 
-> ⚠️ Последний запушенный коммит — `ac4d6ac`. Почти всё, что ниже, **не закоммичено**:
-> guard, speech, delete_event, прямой GigaChat, кэш промпта, лимит шагов, таймаут,
-> разметка недель, offsets, дедупликация, статусы в UI.
-> Перед работой в другой копии репозитория попроси пользователя закоммитить и запушить.
+> ⚠️ Последний запушенный коммит — `ac4d6ac`. Локально: `2ef76b7` (снимок до T1), `27b8070` (merge `origin/main`).
+> T1 и T2 **не закоммичены**. Перед работой в другой копии репозитория попроси пользователя закоммитить и запушить.
 > Сам коммить только по явной просьбе и **без строки `Co-Authored-By`**.
 
-Код лежит в `src/assistant/` (пакет `assistant`). Структура `main` — `app/`, перенос — задача T1.
+Структура `main` (T1): пакет `app/`, `src/` удалён. Подробно — `docs/ML.md` §0 и §3.
 
 | Файл | Что делает |
 |---|---|
-| `llm/prompts.py` | Системный промпт. Неизменные правила стоят в начале, время в конце (ради кэша GigaChat). Календарь на 14 дней с пометками «эта/следующая неделя» и «сегодня/завтра/послезавтра». Готовые значения «через 15 мин … 4 часа» с переходом через полночь. Примеры решений не совпадают с eval-фразами. |
-| `llm/model.py` | Фабрика моделей: `LLM_PROVIDER=gigachat` (langchain-gigachat) или `cloudru` (ChatOpenAI, OpenAI-совместимый API). `llm_session(user_id)` передаёт GigaChat `X-Session-ID` (sha256 от user_id), чтобы кэш промпта работал между запросами. |
-| `llm/agent.py` | `Assistant.handle(user_id, text, now)` → `AgentReply` (text, tool_calls, токены, стоимость, латентность, retried). Агент — `create_agent` из LangChain 1.x, граф собирается на каждый запрос. `recursion_limit=10`. При зацикливании отдаёт `STUCK_ANSWER`. Время `now` передаётся извне (заготовка под `reference_time`). |
-| `llm/tools.py` | MCP-инструменты превращаются в LangChain tools. `user_id` убран из схемы и подставляется кодом. `anyOf [X, null]` упрощается до `X`: GigaChat отвергает объединения типов. Ошибки инструмента возвращаются модели как данные. |
-| `llm/guard.py` | Ловит ложное «записал/создал» без успешного create_event и ложное «удалил/отменил» без delete_event. Тогда делает один повтор с указанием на ошибку. Если и повтор не помог, отдаёт честный ответ. Ложный ответ в историю не попадает. |
-| `llm/speech.py` | Чистит ответ от markdown, списков и эмодзи, сводит строки в одну (ответ рассчитан на голос и короткий текст). |
-| `llm/history.py` | История диалога «ходами» в Redis (`assistant:history:<user_id>`): последние 10 ходов, TTL 24 часа. Есть InMemory-вариант для тестов. |
-| `asr/` | Протокол `SpeechRecognizer` и `GigaAMRecognizer` (`v3_e2e_rnnt`, CPU, до 25 с, через ffmpeg, блокировка от параллельного инференса). |
-| `mcp_server/server.py` + `events/` | **Заглушка роли 4** на SQLite: `create_event` (идемпотентный: та же запись = `already_exists`), `get_event`, `get_event_by_query`, `delete_event`. Время хранится в UTC. Поиск — по основам слов. |
-| `metrics.py` | Prometheus: латентность по этапам, токены, стоимость запроса (гистограмма для p50/p95), tool calls, ошибки, повторы guard. |
-| `demo/web.py` + `static/index.html` | Веб-демо: микрофон, `/api/transcribe` → `/api/chat`, статусы «Идёт запись / Распознаю речь / Обрабатываю запрос» с таймером, панель отладки. Пользователь определяется cookie (только для демо). `/metrics`. |
-| `demo/cli.py` | Текстовый чат в терминале, режим `--debug`. |
-| `evals/` | 31 кейс × N повторов. Своё `now` на кейс. Сбои API считаются отдельно (ERR). Проверки: tool, аргументы, время с допуском, диапазон, forbid-список инструментов, пригодность ответа для озвучки. Отчёты JSON в `evals/reports/` (в .gitignore). |
+| `app/llm/prompts.py` | Системный промпт. Неизменные правила в начале, время в конце (ради кэша GigaChat). Блоки: «Через сколько» (15 мин … 4 часа, через полночь), «Готовые периоды» `[start, end)` (сегодня, завтра, вчера, неделя, выходные, следующая и прошлая неделя), календарь на 14 дней вперёд и отдельно «Прошедшие дни». Правило 10 и пример удаления зависят от `enable_delete`. |
+| `app/llm/model.py` | Только GigaChat API (`build_chat_model`). `llm_session(user_id)` передаёт `X-Session-ID` (sha256 от user_id) для кэша промпта. |
+| `app/llm/speech.py` | Чистит ответ от markdown, списков и эмодзи, сводит в одну строку. |
+| `app/agent/agent.py` | `Assistant(model, mcp, history, pricing, *, enable_delete=False).handle(user_id, text, *, reference_time, timezone)` → `AgentReply`. Без флага `delete_event` не отдаётся модели. `ToolCall.args` — аргументы после `normalize_args`, то есть то, что ушло в MCP. **Владелец — роль 1**, здесь как готовая реализация. |
+| `app/agent/tools.py` | MCP → LangChain tools, `user_id` подставляется кодом, `anyOf [X, null]` → `X`. `normalize_args` чинит два сбоя GigaChat при нескольких записях в одной фразе (см. §4). |
+| `app/agent/guard.py` | Ложное «записал» без create_event и «удалил» без delete_event → один повтор, затем честный ответ. |
+| `app/agent/history.py` | История «ходами» в Redis, TTL 7 дней, бюджет токенов (T6). |
+| `app/asr/` | `base.py` (протокол, `Transcript`, ошибки), `audio.py`, `gigaam_asr.py`, `yandex.py`, `factory.build_recognizer`. `__init__.py` пустой, как в `main`. |
+| `app/config.py`, `app/metrics.py` | Настройки ML-части (без Cloud.ru), флаг `ENABLE_DELETE_EVENT=false`; метрики Prometheus. |
+| `tests/fakes/` | Тестовая подмена MCP-сервера роли 4 на SQLite с контрактом AGENTS §8: `create_event` (`datetime` либо `date`), `get_events_by_period`, `get_event_by_query(query, event_types?, start_time?, end_time?, limit)`, `delete_event` за флагом. Полуинтервалы, статусы задач `todo/in_progress/done`, у встреч и напоминаний статуса нет. Не продукт. |
+| `tools/demo/` | Dev-демо: `web.py` + `static/`, `cli.py`, `runtime.py` (`DemoSettings`: `TIMEZONE`, `STORAGE_PATH`). |
+| `evals/` | 126 кейсов (5 классов + delete), tune/holdout, `--enable-delete`, `--provider cloudru` (`evals/cloudru.py`, только для сравнения). Сид-задачи без времени — датой `YYYY-MM-DD`. |
 
-**Последние результаты eval** (×3, temperature 0.1):
+**Последние результаты eval** (×3, temperature 0.1, контракт AGENTS §8 после T2). Полная таблица — `docs/ML_EVAL.md`:
 
-| Модель | Кейсы | p50 / p95 | Цена |
-|---|---|---|---|
-| `GigaChat-2-Max` (прямой API, пакет B2B) | **93/93** | 2,4 / 6,9 с | 0 ₽ (пакет) |
-| `ai-sage/GigaChat3.5-432B-A28B-Reasoning` (Cloud.ru) | 66/66 на старом промпте, текущий не проверен | 4,7 / 9,2 с | ~0,41 ₽/запрос |
-| GigaChat-2-Pro / 3-Pro / 3-Lightning | 88% / 83% / 77% | 2–3 с | 0 |
+| Модель | tune | holdout | всего | латентность среднее / медиана / p95 | Цена |
+|---|---|---|---|---|---|
+| `GigaChat-2-Max` (прямой API, пакет B2B) | 146/153 (95%) | 207/210 (99%) | **353/363 (97%)** | 2,4 / 2,6 / 4,0 с | 0 ₽ (пакет) |
+| то же, кейсы удаления с `--enable-delete` | 15/15 | — | 15/15 | — | 0 ₽ |
+| `GigaChat-2-Max` до T2 (прототипный контракт) | 141/150 | 222/225 | 363/375 (97%) | — | 0 ₽ |
+| Cloud.ru GigaChat 3.5 и слабые GigaChat | не проверялись на 125+ кейсах | | | | |
+
+Стабильно падают (и до T2): `remind_without_time_asks` (создаёт напоминание на 00:00), `h_nov31` (создаёт встречу 31 ноября, сервер отклоняет), `yekb_in_two_hours_late` (00:30 сегодня вместо завтра).
 
 Слабые модели создают встречу без времени, путают дни недели, плохо считают «через N часов».
 
 ASR GigaAM на синтезированной речи (голос Windows Irina): 4/4 фразы распознаны правильно, числа сразу цифрами. Около 1 с на фразу после прогрева, первая загрузка модели ~13 с.
 **На живой речи и с шумом не проверялся.**
 
-Проверки: `pytest` 65 passed, ruff и mypy (strict) — 0 ошибок.
+Проверки: `pytest` 109 passed, ruff, ruff format и mypy (strict) — 0 ошибок.
 
 ## 3. Расхождения с `main` / AGENTS.md
 
@@ -87,23 +87,23 @@ ASR GigaAM на синтезированной речи (голос Windows Irin
 
 | Тема | У нас сейчас | В `main` | Что делать |
 |---|---|---|---|
-| Структура | `src/assistant/*`, uv `--lib` | корневой пакет `app/{agent,llm,asr,tts,mcp_server,planner,storage,...}`, тесты в `tests/` | T1: перенести в `app/`, удалить `src/` |
-| Владение кодом | агентский цикл, guard, история, MCP и SQLite написаны мной | агент — роль 1, MCP/хранилище — роль 4 | T1: моё — только `app/llm`, `app/asr`, `app/tts`, `evals/`. Агент передать роли 1 как готовую реализацию, MCP/SQLite — только тестовая подмена в `tests/` |
-| Инструмент периода | `get_event(event_type: list, …)` | `get_events_by_period(start_time, end_time, event_types?)` | T2 |
-| Поиск | `get_event_by_query(text, …)` | `get_event_by_query(query, типы?, период?, limit)` | T2 |
-| Задача с датой без времени | `datetime=…T23:59:00` | поле `date` (DATE), взаимоисключающее с `datetime`; отсутствие времени ничем не подменять | T2: убрать 23:59 из промпта и eval |
-| Границы периода | закрытые, до `23:59:59` | полуинтервал `[start, end)` | T2 |
-| Статусы | `pending/done` | задачи: `todo/in_progress/done` | T2 |
-| Время запроса | `now` в `handle()`, по умолчанию `datetime.now` | неизменный `reference_time` первого приёма; timezone из профиля | T3 |
+| Структура | ✅ `app/{llm,asr,agent}`, `tests/fakes`, `tools/demo`, `src/` удалён (T1) | корневой пакет `app/{agent,llm,asr,tts,mcp_server,planner,storage,...}`, тесты в `tests/` | T1: перенести в `app/`, удалить `src/` |
+| Владение кодом | ✅ агент в `app/agent` как готовая реализация для роли 1; заглушка MCP — `tests/fakes` (T1) | агент — роль 1, MCP/хранилище — роль 4 | T1: моё — только `app/llm`, `app/asr`, `app/tts`, `evals/`. Агент передать роли 1 как готовую реализацию, MCP/SQLite — только тестовая подмена в `tests/` |
+| Инструмент периода | ✅ `get_events_by_period(start_time, end_time, event_types?)` (T2) | `get_events_by_period(start_time, end_time, event_types?)` | T2 |
+| Поиск | ✅ `get_event_by_query(query, event_types?, start_time?, end_time?, limit)` (T2) | `get_event_by_query(query, типы?, период?, limit)` | T2 |
+| Задача с датой без времени | ✅ `date`, взаимоисключающее с `datetime`; 23:59 нет ни в промпте, ни в eval (T2) | поле `date` (DATE), взаимоисключающее с `datetime`; отсутствие времени ничем не подменять | T2: убрать 23:59 из промпта и eval |
+| Границы периода | ✅ `[start, end)`, готовые периоды в промпте, строгий `covers()` (T2) | полуинтервал `[start, end)` | T2 |
+| Статусы | ✅ задачи `todo/in_progress/done`, у остальных типов статуса нет (T2, в заглушке) | задачи: `todo/in_progress/done` | T2 |
+| Время запроса | ✅ `reference_time` и `timezone` явно в `handle()` (T3) | неизменный `reference_time` первого приёма; timezone из профиля | T3 |
 | Идемпотентность | дедуп по (тип, имя, время) в заглушке | `action_id` от сервера (роль 4/1) | Мой дедуп не переносить в общий код, остаётся только в тестовой подмене |
 | История | ✅ TTL 7 дней, 20 ходов, в промпт — по бюджету 3000 токенов (оценка), ходы целиком | TTL 7 дней, бюджет по токенам, пары tool call/result | T6 сделано; ключ `assistant:history:<user_id>` согласовать с ролями 1 и 2 (`docs/ML.md` §1) |
-| `delete_event` | есть (по просьбе пользователя) | не входит в 3 инструмента MVP | Не включать, пока роль 4 не согласует контракт. До тех пор — выключено флагом |
-| LLM-провайдер | GigaChat напрямую **и** Cloud.ru через `langchain-openai` | стек: LangChain + GigaChat API | Основной — GigaChat API. Cloud.ru — только по решению команды о смене стека; иначе убрать из `app/` и оставить в `evals/` как способ сравнения |
-| Redis | образ Valkey 8.1 | Redis | В `docker-compose` взять образ `redis`, если роль 1 не решит иначе |
+| `delete_event` | ✅ за флагом `ENABLE_DELETE_EVENT=false`: инструмент скрыт, промпт говорит «пока не умею» (T2). Предложение роли 4 — ниже | не входит в 3 инструмента MVP | Не включать, пока роль 4 не согласует контракт. До тех пор — выключено флагом |
+| LLM-провайдер | ✅ в `app/` только GigaChat; Cloud.ru — `evals/cloudru.py`, `langchain-openai` в dev-группе (T1) | стек: LangChain + GigaChat API | Основной — GigaChat API. Cloud.ru — только по решению команды о смене стека; иначе убрать из `app/` и оставить в `evals/` как способ сравнения |
+| Redis | ✅ `redis:8.2-alpine` в `docker-compose.yml` (T1) | Redis | В `docker-compose` взять образ `redis`, если роль 1 не решит иначе |
 | Хранилище | SQLite-заглушка | PostgreSQL (роль 4) | Только тестовая подмена, не хранилище продукта |
-| Демо-страница | FastAPI + HTML, пользователь по cookie | Mini App (роль 5) и бот (роль 2); `user_id` не берётся из клиента | Dev-инструмент для проверки ML. Не класть в `app/` без согласования, не выдавать за продукт |
-| Eval | 31 кейс | 20–30 на каждый из 5 классов, отдельные настроечные и отложенные выборки | T4 |
-| Экономика | p50/p95 | среднее, медиана, p95; токены и секунды аудио; бесплатный лимит отдельно | T4 |
+| Демо-страница | ✅ `tools/demo/` (вне `app/`, согласовано с пользователем 21.10) | Mini App (роль 5) и бот (роль 2); `user_id` не берётся из клиента | Dev-инструмент для проверки ML. Не класть в `app/` без согласования, не выдавать за продукт |
+| Eval | ✅ 125 кейсов, tune/holdout (T4) | 20–30 на каждый из 5 классов, отдельные настроечные и отложенные выборки | T4 |
+| Экономика | ✅ среднее/медиана/p95, токены вход/выход, факт и прайс отдельно (T4); кэшированные токены не учтены | среднее, медиана, p95; токены и секунды аудио; бесплатный лимит отдельно | T4 |
 | ASR | GigaAM и адаптер SpeechKit, раннер сравнения готов; живых записей и ключа Yandex нет | сравнить GigaAM и Yandex SpeechKit, выбрать один; не обещать локальный ASR на VPS без замеров | T5: записать фразы, получить ключ, прогнать, выбрать |
 | TTS | убран | необязателен, `app/tts` | T8, по желанию |
 
@@ -114,9 +114,9 @@ ASR GigaAM на синтезированной речи (голос Windows Irin
 - **Зависимости.** `uv sync --extra asr`. GigaAM ставится из git (коммит зафиксирован в pyproject), тянет torch для CPU.
   ffmpeg установлен через winget, но в новых процессах PATH может не обновиться.
   Перед запуском в PowerShell: `$env:Path = [Environment]::GetEnvironmentVariable("Path","User") + ";" + [Environment]::GetEnvironmentVariable("Path","Machine")`.
-- **Redis.** `docker compose up -d redis` (Valkey 8.1, 127.0.0.1:6379). Docker Desktop может быть выключен, тогда сначала запусти его.
+- **Redis.** `docker compose up -d redis` (`redis:8.2-alpine`, 127.0.0.1:6379). Docker Desktop может быть выключен, тогда сначала запусти его.
 - **Секреты в `.env`** (в git не попадает). Значения **никогда не печатай**: проверяй только наличие, например через `sed` с маскировкой.
-  - `LLM_PROVIDER=gigachat`, `GIGACHAT_MODEL=GigaChat-2-Max`.
+  - `GIGACHAT_MODEL=GigaChat-2-Max`. `LLM_PROVIDER` больше не читается: в `app/` только GigaChat, Cloud.ru — `--provider cloudru` в eval.
   - `GIGACHAT_SCOPE=GIGACHAT_API_B2B`. Не `PERS`: с ним ключ получает ошибку 400 «scope from db not fully includes consumed scope».
   - `GIGACHAT_CA_BUNDLE_FILE=certs/russian_trusted_root_ca.pem`. Сертификат Минцифры скачан с https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt, папка `certs/` в .gitignore.
   - `CLOUDRU_API_KEY` есть.
@@ -127,18 +127,23 @@ ASR GigaAM на синтезированной речи (голос Windows Irin
   - не принимает `anyOf` в схеме функций (исправлено в `tools.py`);
   - новый клиент на каждый кейс ловит ошибку 429 на OAuth, поэтому в eval одна модель на весь прогон;
   - без кэша промпта ~8 с, с кэшем ~2 с: кэшируется совпадающее начало запроса внутри `X-Session-ID`;
-  - иногда запросы висят 20+ с, поэтому таймаут 12 с и 1 повтор (`LLM_TIMEOUT_S`, `LLM_MAX_RETRIES`).
+  - иногда запросы висят 20+ с, поэтому таймаут 12 с и 1 повтор (`LLM_TIMEOUT_S`, `LLM_MAX_RETRIES`);
+  - один function call на сообщение. Если в фразе несколько записей, модель пытается сделать второй вызов сразу, и его начало вклеивается в строку: `"2026-10-20T09:00:00+03:00}} assistant function callrecipient{"`. Ещё она добавляет `date`, равную дню из `datetime`, и после ошибки сервера повторяет тот же вызов до лимита шагов. Ни понятная ошибка, ни правило в промпте не помогли; `app/agent/tools.py:normalize_args` обрезает хвост и убирает лишнюю `date`;
+  - дни недели: если в календаре прошлые дни стоят раньше сегодняшнего, модель сдвигает «в четверг» на день. Прошедшие дни — отдельным блоком после календаря;
+  - концы полуинтервалов модель считает с ошибкой на день («выходные» до вторника). Поэтому периоды в промпте посчитаны заранее.
 - **Cloud.ru.** OpenAI-совместимый API `https://foundation-models.api.cloud.ru/v1`, список моделей — `GET /models` (бесплатно). Есть `GigaChat/SaluteSpeech`, `openai/whisper-large-v3`, `Giga-Embeddings`.
 - **Консоль Windows:** ставь `PYTHONIOENCODING=utf-8`. curl из Git Bash портит кириллицу в `-d`, поэтому тело запроса пиши в файл и отправляй через `--data-binary @file`.
-- **Демо:** `uv run --extra asr uvicorn assistant.demo.web:app --port 8000`. Чтобы перезапустить, найди процесс по командной строке, где есть `uvicorn` и `assistant.demo.web`.
+- **Демо:** `uv run --extra asr uvicorn tools.demo.web:app --port 8000`. Чтобы перезапустить, найди процесс по командной строке, где есть `uvicorn` и `tools.demo.web`.
+- **`uv sync` без `--extra asr` удаляет torch и GigaAM.** После `uv lock`/`uv sync` всегда `uv sync --extra asr`.
 
 ## 5. Команды
 
 ```bash
-uv run ruff check . && uv run ruff format --check . && uv run mypy src evals && uv run pytest   # без сети и LLM
+uv run ruff check . && uv run ruff format --check . && uv run mypy && uv run pytest              # без сети и LLM
 PYTHONIOENCODING=utf-8 uv run python -m evals.run --repeat 3                                       # бесплатно на пакете
-uv run python -m evals.run -k delete_ today_ --model GigaChat-2-Pro                                 # подмножество и другая модель
-uv run python -m assistant.demo.cli --debug                                                         # текстовый чат
+uv run python -m evals.run -k today_ --model GigaChat-2-Pro                                         # подмножество и другая модель
+uv run python -m evals.run --repeat 3 --enable-delete --category delete                             # кейсы удаления
+uv run python -m tools.demo.cli --debug                                                             # текстовый чат
 ```
 
 ## 6. Задачи
@@ -151,7 +156,13 @@ uv run python -m assistant.demo.cli --debug                                     
 сделан свежий `git fetch`, изменения сверены с `AGENTS.md`, `docs/ARCHITECTURE.md` и `README.md` из `origin/main` и им не противоречат.
 Если противоречие неизбежно (например, нужно изменить контракт роли 4), задача не считается готовой, пока пользователь его не согласует.
 
-### T1. Перенести ML-часть в структуру `main`
+### T1. Перенести ML-часть в структуру `main` — ✅ 2026-10-21
+
+> Сделано: снимок `2ef76b7`, `git merge origin/main` (`27b8070`; README взят из `main`, `.gitignore` объединён, ML-раздел старого README — в `docs/ML.md` §3).
+> Перенос через `git mv`: `prompts/model/speech` → `app/llm`; `asr/*` → `app/asr` (фабрика — `factory.py`, `__init__.py` пустой); `agent/guard/history/tools` → `app/agent`; `config`, `metrics` → `app/`; SQLite-заглушка и MCP → `tests/fakes/`; демо и `runtime.py` → `tools/demo/` (место выбрал пользователь).
+> Cloud.ru убран из `app/` в `evals/cloudru.py`, `langchain-openai` перенесён в dev-группу. `pyproject`: пакет `voice-assistant`, модуль `app` без src-layout, mypy-пути `app evals tools tests/fakes`. Valkey → `redis:8.2-alpine`.
+> Проверки: ruff, ruff format, mypy (strict, 44 файла) — 0 ошибок; pytest 109 passed. Чужие модули (`bot`, `api`, `planner`, `storage`, `mcp_server`, `workers`, `tts`) не тронуты.
+> ⚠️ После T1 в `origin/main` пришли `d5f525f` (роль 1/4: `app/planner/{task,service,repository}.py`, `app/storage/{memory,redis,redis_tasks}.py`, `compose.yaml` с `redis:7.4.2-alpine`, `docs/backend-contracts.md`, свой `pyproject.toml`/`uv.lock`/`.env.example`). **Ещё не влито.** Ожидаемые конфликты: `pyproject.toml`, `uv.lock`, `.env.example`; `compose.yaml` дублирует наш `docker-compose.yml` — оставить их файл, наш удалить. `docs/backend-contracts.md` с T2 согласуется (`date`/`datetime` взаимоисключающие, поля результата те же), но статус задачи у них пока `active`, а не `todo`.
 
 - **Цель.** Код роли 3 живёт в `app/llm`, `app/asr`, eval — в `evals/`, тесты — в `tests/`. Ветку можно влить в `main` без конфликтов.
 - **Шаги:**
@@ -168,7 +179,15 @@ uv run python -m assistant.demo.cli --debug                                     
 - **Готово, когда:** ruff, mypy и pytest зелёные, eval запускается, в `src/` ничего не осталось.
   Пустые `__init__.py` из `main` сохранены, чужие модули не тронуты.
 
-### T2. Привести контракт MCP к AGENTS §8 и §7 (по согласованию с ролью 4)
+### T2. Привести контракт MCP к AGENTS §8 и §7 (по согласованию с ролью 4) — ✅ 2026-10-21, ждёт подтверждения роли 4
+
+> Сделано: инструменты заглушки и промпт по AGENTS §8: `get_events_by_period(start_time, end_time, event_types?)`, `get_event_by_query(query, event_types?, start_time?, end_time?, limit 1–50)`, `create_event(…, datetime | date)` со взаимоисключением, у встречи и напоминания только `datetime`. Полуинтервалы `[start, end)`, у задач статус `todo` при создании.
+> Промпт: правила 3–6 переписаны, 23:59 убран. Добавлены «Готовые периоды» и «Прошедшие дни», правило 10 и пример удаления зависят от флага. Правки T7 (правило про прошедшее время, примеры «планёрка» и «полчаса», «Время записи называй явно») сохранены.
+> `delete_event`: флаг `ENABLE_DELETE_EVENT=false` → инструмент не отдаётся модели, сервер-заглушка его не регистрирует, промпт: «пока не умею». Guard ловит ложное «удалил» и без инструмента.
+> `app/agent/tools.py:normalize_args` обходит два сбоя GigaChat (§4). `ToolCall.args` теперь содержит аргументы, отправленные в MCP.
+> Eval: строгий `covers()` (23:59:59 — ошибка), `due_on`, `on_day`, `no_time`, `types_include` по `event_types`, сиды задач — датой. 5 holdout-кейсов, на которых разбирались регрессии, перенесены в tune (`MOVED_TO_TUNE`).
+> Результат: 353/363 (97%), holdout 207/210 (99%); до T2 — 363/375 (97%), holdout 222/225 (99%). Наборы различаются, см. `docs/ML_EVAL.md`. Удаление с флагом — 15/15.
+> **Не согласовано с ролью 4:** имена и описания полей заглушки (`event_types`, `limit`, формат ошибок, `already_exists`), отсутствие статуса у встреч и напоминаний, `delete_event` как 4-й инструмент. Это предложение; когда роль 4 опубликует контракт, сверить `tests/fakes/mcp_server.py` и промпт.
 
 - **Цель.** Промпт, схемы, заглушка и eval совпадают с контрактом команды.
 - **Шаги:**
@@ -180,7 +199,13 @@ uv run python -m assistant.demo.cli --debug                                     
   - `delete_event` предложить роли 4 как дополнительный инструмент. Если не согласуют, оставить за флагом и не включать в MVP.
 - **Готово, когда:** eval на GigaChat-2-Max ×3 не ниже 95% и в отчёте видна разница с прошлым результатом.
 
-### T3. Временная опора и timezone
+### T3. Временная опора и timezone — ✅ 2026-10-21
+
+> Сделано: `handle(user_id, text, *, reference_time, timezone)`, у `Assistant` больше нет `tz`. `datetime.now(UTC)` вызывается только в `demo/web.py` (в `/api/voice` — до ASR) и `demo/cli.py`.
+> `render_system_prompt(reference_time, tz)` пересчитывает время в зону пользователя и выводит в промпт строки «Часовой пояс пользователя» и «Время запроса». `user_timezone()` не принимает неизвестную зону.
+> `_offsets` считает в UTC: раньше при переходе на зимнее время значения сдвигались на час.
+> Тесты в `tests/test_reference_time.py`: граница суток, граница недели, Екатеринбург (тот же момент UTC — другие сутки), DST Berlin, повтор после полуночи, неизвестная зона.
+> Eval: 8 кейсов в Asia/Yekaterinburg и Asia/Vladivostok плюс `before_midnight_tomorrow` — все 3/3.
 
 - **Цель.** Относительные даты считаются от `reference_time` сообщения (AGENTS §7). Timezone берётся из профиля или параметра, а не из глобальной константы.
 - **Шаги:**
@@ -189,7 +214,17 @@ uv run python -m assistant.demo.cli --debug                                     
   - eval-кейсы с другой зоной (например, `Asia/Yekaterinburg`) и с повтором запроса после полуночи: опора не меняется.
 - **Готово, когда:** тесты на границы суток и недели и на смену зоны проходят.
 
-### T4. Eval по AGENTS §15
+### T4. Eval по AGENTS §15 — ✅ 2026-10-21
+
+> Сделано: 125 кейсов — create 31, period 24, clarify 22, search 22, general 21, плюс delete 5 вне MVP. `Case.split` и `Case.timezone`, `--split`/`--category`.
+> В отчёте среднее, медиана и p95 для латентности, стоимости и токенов (вход и выход отдельно), `evals/stats.py`.
+> Таблица для роли 6: `evals/summary.py` → `docs/ML_EVAL.md`.
+> GigaChat-2-Max ×3: **holdout 222/225 (99%)**, tune 141/150 (94%), всего 363/375. Отчёт `20261021-170118-…-all.json`.
+> **Осталось:**
+> - входные токены GigaChat не включают `precached_prompt_tokens`. Нужно суммировать `usage_metadata.input_token_details.cache_read` в `AgentReply` и переснять таблицу;
+> - провалы tune: `remind_without_time_asks` 0/3 (создаёт напоминание без времени), `last_friday` 0/3 (в календаре промпта нет прошлых дней), `past_time_today_asks` 0/3 (кейс T7);
+> - holdout `h_nov31`: модель пытается создать 31 ноября, сервер отказывает, потом модель уточняет;
+> - eval на старом контракте (`get_event`, `text`): после T2 переснять.
 
 - **Цель.** 20–30 запросов на каждый класс: создание, период, уточнение, поиск, общий вопрос.
   Выборка разделена на `tune` (по ней правим промпт) и `holdout` (только итоговые замеры).

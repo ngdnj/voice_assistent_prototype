@@ -15,7 +15,7 @@ import asyncio
 import json
 import sys
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, get_args
 from zoneinfo import ZoneInfo
@@ -23,16 +23,17 @@ from zoneinfo import ZoneInfo
 from fastmcp import Client
 from langchain_core.language_models import BaseChatModel
 
-from assistant.config import Settings, get_settings
-from assistant.events.models import EventType
-from assistant.events.storage import EventStorage
-from assistant.llm.agent import AgentReply, Assistant, Pricing
-from assistant.llm.history import InMemoryChatHistory
-from assistant.llm.model import build_chat_model
-from assistant.mcp_server.server import build_server
+from app.agent.agent import AgentReply, Assistant, Pricing
+from app.agent.history import InMemoryChatHistory
+from app.config import Settings, get_settings
+from app.llm.model import build_chat_model
 from evals.cases import CASES, Case, Category, Split
 from evals.checks import Check, speech_issues
+from evals.cloudru import CloudRuSettings, build_cloudru_model
 from evals.stats import summarize
+from tests.fakes.events import EventType
+from tests.fakes.mcp_server import build_server
+from tests.fakes.storage import EventStorage
 
 REPORTS_DIR = Path(__file__).parent / "reports"
 INFRA_ATTEMPTS = 3
@@ -90,15 +91,31 @@ def _evaluate(case: Case, reply: AgentReply) -> list[str]:
     return errors
 
 
+def _seed_time(value: str | None) -> tuple[datetime | None, date | None]:
+    """A seed time is an ISO moment or, for a task without time, a plain YYYY-MM-DD date."""
+    if not value:
+        return None, None
+    if len(value) == len("YYYY-MM-DD"):
+        return None, date.fromisoformat(value)
+    return datetime.fromisoformat(value), None
+
+
 async def _run_case(case: Case, settings: Settings, model: BaseChatModel) -> CaseResult:
     tz = ZoneInfo(case.timezone)
     storage = EventStorage(":memory:", tz)
     for seed in case.seed:
-        when = datetime.fromisoformat(seed.when) if seed.when else None
-        storage.create("eval", EventType(seed.event_type), seed.name, seed.description, when)
+        when, due_date = _seed_time(seed.when)
+        storage.create("eval", EventType(seed.event_type), seed.name, seed.description, when, due_date)
 
-    async with Client(build_server(storage, tz)) as client:
-        assistant = Assistant(model, client, InMemoryChatHistory(10), Pricing(*settings.pricing))
+    enable_delete = settings.enable_delete_event
+    async with Client(build_server(storage, tz, enable_delete=enable_delete)) as client:
+        assistant = Assistant(
+            model,
+            client,
+            InMemoryChatHistory(10),
+            Pricing(*settings.pricing),
+            enable_delete=enable_delete,
+        )
         # Every turn keeps the case's reference time, like a retried job keeps the original one.
         replies = [
             await assistant.handle("eval", turn, reference_time=case.now, timezone=case.timezone)
@@ -189,10 +206,21 @@ async def main() -> int:
     parser.add_argument("--category", nargs="*", choices=get_args(Category), default=[])
     parser.add_argument("--repeat", type=int, default=1, help="run each case N times to measure stability")
     parser.add_argument("--temperature", type=float, help="override LLM_TEMPERATURE")
-    parser.add_argument("--model", help="override the model of the active LLM_PROVIDER")
+    parser.add_argument(
+        "--provider",
+        choices=["gigachat", "cloudru"],
+        default="gigachat",
+        help="gigachat — product stack; cloudru — only for comparison, costs money",
+    )
+    parser.add_argument("--model", help="override the model of the provider")
     parser.add_argument("--concurrency", type=int, default=2, help="parallel cases (mind API rate limits)")
     parser.add_argument("--price-in", type=float, help="RUB per 1000 input tokens for this model")
     parser.add_argument("--price-out", type=float, help="RUB per 1000 output tokens for this model")
+    parser.add_argument(
+        "--enable-delete",
+        action="store_true",
+        help="give the agent delete_event and run the delete cases (not an MVP tool, off by default)",
+    )
     args = parser.parse_args()
 
     overrides: dict[str, Any] = {}
@@ -202,9 +230,15 @@ async def main() -> int:
         overrides["llm_price_input_rub_per_1k"] = args.price_in
     if args.price_out is not None:
         overrides["llm_price_output_rub_per_1k"] = args.price_out
+    if args.enable_delete:
+        overrides["enable_delete_event"] = True
     settings = get_settings().model_copy(update=overrides)
     if args.model:
         settings = settings.with_llm_model(args.model)
+    cloudru = CloudRuSettings()
+    if args.provider == "cloudru" and args.model:
+        cloudru = cloudru.model_copy(update={"cloudru_model": args.model})
+    model_name = cloudru.cloudru_model if args.provider == "cloudru" else settings.llm_model
 
     cases = [
         c
@@ -212,13 +246,16 @@ async def main() -> int:
         if (not args.k or any(c.id.startswith(p) for p in args.k))
         and (args.split == "all" or c.split == args.split)
         and (not args.category or c.category in args.category)
+        and c.runs_with(settings.enable_delete_event)
     ]
     if not cases:
         print("Нет кейсов под фильтр", file=sys.stderr)
         return 2
 
     # One model (and one OAuth token) for the whole run: per-case clients hit the auth rate limit.
-    model = build_chat_model(settings)
+    model = (
+        build_cloudru_model(settings, cloudru) if args.provider == "cloudru" else build_chat_model(settings)
+    )
     semaphore = asyncio.Semaphore(args.concurrency)
 
     async def bounded(case: Case) -> CaseResult:
@@ -235,16 +272,17 @@ async def main() -> int:
     REPORTS_DIR.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     report = {
-        "provider": settings.llm_provider,
-        "model": settings.llm_model,
+        "provider": args.provider,
+        "model": model_name,
         "temperature": settings.llm_temperature,
         "repeat": args.repeat,
+        "enable_delete": settings.enable_delete_event,
         "filter": {"split": args.split, "category": args.category, "k": args.k},
         "pricing_rub_per_1k": {"input": settings.pricing[0], "output": settings.pricing[1]},
         "summary": summaries,
         "results": rows,
     }
-    model_slug = settings.llm_model.replace("/", "_")
+    model_slug = model_name.replace("/", "_")
     path = REPORTS_DIR / f"{stamp}-{model_slug}-t{settings.llm_temperature}-{args.split}.json"
     path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\nОтчёт: {path}")

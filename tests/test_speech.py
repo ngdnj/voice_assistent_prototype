@@ -1,4 +1,4 @@
-from assistant.llm.speech import to_speech_text
+from app.llm.speech import to_speech_text
 from evals.checks import speech_issues
 
 

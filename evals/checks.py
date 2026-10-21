@@ -102,10 +102,49 @@ def on_date(key: str, *expected: str) -> Check:
     return check
 
 
-def covers(start_iso: str, end_iso: str, max_extra: timedelta = timedelta(days=1)) -> Check:
-    """Range [start_time, end_time] includes the expected period and is not much wider.
+def due_on(*expected: str) -> Check:
+    """A task date without time: `date` is one of `expected` and no `datetime` is invented (AGENTS §7)."""
 
-    An end up to one minute early is accepted: 23:59:00 instead of 23:59:59 loses nothing in practice.
+    def check(args: dict[str, Any]) -> str | None:
+        if args.get("datetime"):
+            return f"datetime={args['datetime']!r}: для задачи без времени ожидалась только date"
+        actual = args.get("date")
+        wanted = " или ".join(expected)
+        return None if actual in expected else f"date={actual!r}, ожидалась {wanted}"
+
+    return check
+
+
+def on_day(*expected: str) -> Check:
+    """The record falls on one of `expected` days, by `date` or by the local date of `datetime`.
+
+    For phrases where both a dated task and a timed reminder are acceptable.
+    """
+    by_datetime = on_date("datetime", *expected)
+
+    def check(args: dict[str, Any]) -> str | None:
+        if args.get("date") and not args.get("datetime"):
+            return None if args["date"] in expected else f"date={args['date']!r}, ожидалась {expected}"
+        return by_datetime(args)
+
+    return check
+
+
+def no_time() -> Check:
+    """A task without a deadline: neither `date` nor `datetime`."""
+
+    def check(args: dict[str, Any]) -> str | None:
+        extra = {k: args[k] for k in ("date", "datetime") if args.get(k)}
+        return f"задача без срока, но передано {extra}" if extra else None
+
+    return check
+
+
+def covers(start_iso: str, end_iso: str, max_extra: timedelta = timedelta(days=1)) -> Check:
+    """Half-open range [start_time, end_time) includes the expected period and is not much wider.
+
+    Periods follow AGENTS §7: the end is not included, so a day ends at 00:00 of the next day.
+    An end at 23:59:59 misses the last second of the period and fails.
     """
     need_start = datetime.fromisoformat(start_iso)
     need_end = datetime.fromisoformat(end_iso)
@@ -114,10 +153,10 @@ def covers(start_iso: str, end_iso: str, max_extra: timedelta = timedelta(days=1
         start, end = _parse(args.get("start_time")), _parse(args.get("end_time"))
         if start is None or end is None:
             return f"диапазон {args.get('start_time')!r}..{args.get('end_time')!r}: не ISO 8601"
-        if start > need_start or end < need_end - END_TOLERANCE:
-            return f"диапазон {start.isoformat()}..{end.isoformat()} не покрывает {start_iso}..{end_iso}"
+        if start > need_start or end < need_end:
+            return f"диапазон [{start.isoformat()}, {end.isoformat()}) не покрывает [{start_iso}, {end_iso})"
         if (need_start - start) + (end - need_end) > max_extra:
-            return f"диапазон {start.isoformat()}..{end.isoformat()} слишком широкий"
+            return f"диапазон [{start.isoformat()}, {end.isoformat()}) слишком широкий"
         return None
 
     return check
@@ -125,11 +164,11 @@ def covers(start_iso: str, end_iso: str, max_extra: timedelta = timedelta(days=1
 
 def types_include(*types: str) -> Check:
     def check(args: dict[str, Any]) -> str | None:
-        requested = args.get("event_type") or []
-        if not requested:  # empty list means "all types"
+        requested = args.get("event_types") or []
+        if not requested:  # no filter means "all types"
             return None
         missing = [t for t in types if t not in requested]
-        return f"event_type={requested}, нет {missing}" if missing else None
+        return f"event_types={requested}, нет {missing}" if missing else None
 
     return check
 

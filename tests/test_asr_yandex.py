@@ -3,10 +3,10 @@
 import httpx
 import pytest
 
-from assistant.asr import AsrError, AudioTooLongError
-from assistant.asr import yandex as yandex_module
-from assistant.asr.audio import BYTES_PER_SECOND
-from assistant.asr.yandex import YandexSpeechKitRecognizer
+from app.asr import yandex as yandex_module
+from app.asr.audio import BYTES_PER_SECOND
+from app.asr.base import AsrError, AudioTooLongError
+from app.asr.yandex import YandexSpeechKitRecognizer
 
 PCM_3S = b"\x00" * (3 * BYTES_PER_SECOND)
 

@@ -13,11 +13,25 @@ Cases with `timezone` set use another IANA zone of the user profile (AGENTS §7)
 """
 
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Literal
 from zoneinfo import ZoneInfo
 
-from evals.checks import Check, Expect, at, covers, equals, mentions, near, on_date, one_of, types_include
+from evals.checks import (
+    Check,
+    Expect,
+    at,
+    covers,
+    due_on,
+    equals,
+    mentions,
+    near,
+    no_time,
+    on_date,
+    on_day,
+    one_of,
+    types_include,
+)
 
 Category = Literal["create", "period", "clarify", "search", "general", "delete"]
 Split = Literal["tune", "holdout"]
@@ -31,6 +45,7 @@ class SeedEvent:
     event_type: str
     name: str
     description: str = ""
+    # ISO moment with offset, or YYYY-MM-DD for a task date without time.
     when: str | None = None
 
 
@@ -45,6 +60,12 @@ class Case:
     now: datetime = NOW
     timezone: str = "Europe/Moscow"
     split: Split = "tune"
+    # Run only with delete_event on (True) or off (False); None — always. Delete cases need it on.
+    delete_tool: bool | None = None
+
+    def runs_with(self, enable_delete: bool) -> bool:
+        needed = self.delete_tool if self.delete_tool is not None else (self.category == "delete" or None)
+        return needed is None or needed == enable_delete
 
 
 LATE_EVENING = datetime(2026, 10, 19, 22, 23, 55, tzinfo=TZ)
@@ -63,8 +84,8 @@ SEED = [
     SeedEvent("task", "Купить подарок маме", "", "2026-10-20T19:00:00+03:00"),
 ]
 
-TODAY = covers("2026-10-19T00:00:00+03:00", "2026-10-19T23:59:59+03:00", max_extra=timedelta(hours=1))
-TOMORROW = covers("2026-10-20T00:00:00+03:00", "2026-10-20T23:59:59+03:00", max_extra=timedelta(hours=1))
+TODAY = covers("2026-10-19T00:00:00+03:00", "2026-10-20T00:00:00+03:00", max_extra=timedelta(hours=1))
+TOMORROW = covers("2026-10-20T00:00:00+03:00", "2026-10-21T00:00:00+03:00", max_extra=timedelta(hours=1))
 
 CASES: list[Case] = [
     # 1. Tasks and reminders
@@ -87,7 +108,7 @@ CASES: list[Case] = [
         ["В пятницу нужно отправить отчет"],
         Expect(
             "create_event",
-            [equals("event_type", "task"), on_date("datetime", "2026-10-23"), mentions("name", "отчет")],
+            [equals("event_type", "task"), due_on("2026-10-23"), mentions("name", "отчет")],
         ),
     ),
     Case(
@@ -96,7 +117,7 @@ CASES: list[Case] = [
         ["Поставь задачу купить билеты до конца недели"],
         Expect(
             "create_event",
-            [equals("event_type", "task"), on_date("datetime", "2026-10-25"), mentions("name", "билет")],
+            [equals("event_type", "task"), due_on("2026-10-25"), mentions("name", "билет")],
         ),
     ),
     Case(
@@ -111,13 +132,13 @@ CASES: list[Case] = [
         "task_day_after_tomorrow",
         "create",
         ["Послезавтра надо забрать посылку"],
-        Expect("create_event", [equals("event_type", "task"), on_date("datetime", "2026-10-21")]),
+        Expect("create_event", [equals("event_type", "task"), due_on("2026-10-21")]),
     ),
     Case(
         "task_no_date",
         "create",
         ["Добавь задачу разобрать почту"],
-        Expect("create_event", [equals("event_type", "task"), mentions("name", "почт")]),
+        Expect("create_event", [equals("event_type", "task"), no_time(), mentions("name", "почт")]),
     ),
     # 2. Meetings
     Case(
@@ -175,27 +196,33 @@ CASES: list[Case] = [
         ),
     ),
     # 4. Period listing — paraphrases must map to the same action
-    Case("today_what", "period", ["Что у меня сегодня?"], Expect("get_event", [TODAY]), seed=SEED),
-    Case("today_plans", "period", ["Какие планы на сегодня?"], Expect("get_event", [TODAY]), seed=SEED),
+    Case("today_what", "period", ["Что у меня сегодня?"], Expect("get_events_by_period", [TODAY]), seed=SEED),
+    Case(
+        "today_plans",
+        "period",
+        ["Какие планы на сегодня?"],
+        Expect("get_events_by_period", [TODAY]),
+        seed=SEED,
+    ),
     Case(
         "today_meetings",
         "period",
         ["Покажи мои встречи на сегодня"],
-        Expect("get_event", [TODAY, types_include("meeting")]),
+        Expect("get_events_by_period", [TODAY, types_include("meeting")]),
         seed=SEED,
     ),
     Case(
         "today_any_meetings",
         "period",
         ["Есть ли у меня встречи сегодня?"],
-        Expect("get_event", [TODAY, types_include("meeting")], answer_mentions=["команд"]),
+        Expect("get_events_by_period", [TODAY, types_include("meeting")], answer_mentions=["команд"]),
         seed=SEED,
     ),
     Case(
         "tomorrow_tasks",
         "period",
         ["Какие задачи у меня на завтра?"],
-        Expect("get_event", [TOMORROW, types_include("task")], answer_mentions=["подар"]),
+        Expect("get_events_by_period", [TOMORROW, types_include("task")], answer_mentions=["подар"]),
         seed=SEED,
     ),
     Case(
@@ -203,8 +230,8 @@ CASES: list[Case] = [
         "period",
         ["Что запланировано на эту неделю?"],
         Expect(
-            "get_event",
-            [covers("2026-10-19T12:00:00+03:00", "2026-10-25T23:59:59+03:00", max_extra=timedelta(hours=13))],
+            "get_events_by_period",
+            [covers("2026-10-19T12:00:00+03:00", "2026-10-26T00:00:00+03:00", max_extra=timedelta(hours=13))],
         ),
         seed=SEED,
     ),
@@ -213,8 +240,8 @@ CASES: list[Case] = [
         "period",
         ["Что у меня на следующей неделе?"],
         Expect(
-            "get_event",
-            [covers("2026-10-26T00:00:00+03:00", "2026-11-01T23:59:59+03:00", max_extra=timedelta(hours=1))],
+            "get_events_by_period",
+            [covers("2026-10-26T00:00:00+03:00", "2026-11-02T00:00:00+03:00", max_extra=timedelta(hours=1))],
         ),
         seed=SEED,
     ),
@@ -223,21 +250,21 @@ CASES: list[Case] = [
         "search_presentation",
         "search",
         ["Найди задачу про презентацию"],
-        Expect("get_event_by_query", [mentions("text", "презентац")], answer_mentions=["презентац"]),
+        Expect("get_event_by_query", [mentions("query", "презентац")], answer_mentions=["презентац"]),
         seed=SEED,
     ),
     Case(
         "search_meeting_ivan",
         "search",
         ["Когда у меня была встреча с Иваном?"],
-        Expect("get_event_by_query", [mentions("text", "иван")], answer_mentions=["12"]),
+        Expect("get_event_by_query", [mentions("query", "иван")], answer_mentions=["12"]),
         seed=SEED,
     ),
     Case(
         "search_contract",
         "search",
         ["Я когда-то ставил задачу по договору, найди ее"],
-        Expect("get_event_by_query", [mentions("text", "договор")], answer_mentions=["договор"]),
+        Expect("get_event_by_query", [mentions("query", "договор")], answer_mentions=["договор"]),
         seed=SEED,
     ),
     # Relative time that crosses midnight: 22:23 + 2 h is tomorrow 00:23, not "today 23:59"
@@ -293,7 +320,16 @@ CASES: list[Case] = [
         ["Напомни завтра в 9 позвонить в банк", "Спасибо"],
         Expect(None),
     ),
-    # 7. Deletion: find the record first, delete by id, ask when ambiguous
+    # 7. Deletion is not an MVP tool: without delete_event the agent says it cannot, and claims nothing
+    Case(
+        "delete_unsupported",
+        "delete",
+        ["Удали встречу с Иваном"],
+        Expect(None, forbid=["delete_event", "create_event"], answer_mentions=["не уме|не могу|пока"]),
+        seed=SEED,
+        delete_tool=False,
+    ),
+    # Deletion with delete_event on: find the record first, delete by id, ask when ambiguous
     Case(
         "delete_meeting_ivan",
         "delete",
@@ -349,12 +385,12 @@ BEFORE_MIDNIGHT = datetime(2026, 10, 19, 23, 55, 0, tzinfo=TZ)
 # More records for search and period questions. Appended after SEED, so ids 1–6 stay the same.
 SEED_WIDE = [
     *SEED,
-    SeedEvent("task", "Записаться к стоматологу", "", "2026-10-15T23:59:00+03:00"),
+    SeedEvent("task", "Записаться к стоматологу", "", "2026-10-15"),
     SeedEvent("meeting", "Встреча с юристом", "договор аренды офиса", "2026-10-14T15:00:00+03:00"),
     SeedEvent("reminder", "Забрать машину из сервиса", "", "2026-10-22T18:00:00+03:00"),
-    SeedEvent("task", "Отправить отчёт по продажам", "", "2026-10-16T23:59:00+03:00"),
+    SeedEvent("task", "Отправить отчёт по продажам", "", "2026-10-16"),
     SeedEvent("meeting", "Созвон с поставщиком", "цены на 2027", "2026-10-27T11:00:00+03:00"),
-    SeedEvent("task", "Продлить страховку", "ОСАГО", "2026-10-30T23:59:00+03:00"),
+    SeedEvent("task", "Продлить страховку", "ОСАГО", "2026-10-30"),
 ]
 
 # A clarifying answer: asks for the time or the day. "a|b" accepts any alternative.
@@ -364,12 +400,15 @@ ASKS_INVALID = ASKS + "|нет такого|не существует|некор
 
 
 def day(iso_date: str, offset: str = "+03:00") -> Check:
-    """The whole local day; an end at 23:59:59 or at the next 00:00 both pass."""
+    """The whole local day as a half-open period: [00:00, 00:00 of the next day)."""
     return days(iso_date, iso_date, offset)
 
 
 def days(first: str, last: str, offset: str = "+03:00") -> Check:
-    return covers(f"{first}T00:00:00{offset}", f"{last}T23:59:59{offset}", max_extra=timedelta(hours=1))
+    end = date.fromisoformat(last) + timedelta(days=1)
+    return covers(
+        f"{first}T00:00:00{offset}", f"{end.isoformat()}T00:00:00{offset}", max_extra=timedelta(hours=1)
+    )
 
 
 def created(*checks: Check, answer: list[str] | None = None) -> Expect:
@@ -377,13 +416,13 @@ def created(*checks: Check, answer: list[str] | None = None) -> Expect:
 
 
 def period(*checks: Check, answer: list[str] | None = None) -> Expect:
-    return Expect("get_event", list(checks), answer_mentions=answer or [])
+    return Expect("get_events_by_period", list(checks), answer_mentions=answer or [])
 
 
 def found(*words: str, answer: list[str] | None = None) -> Expect:
     return Expect(
         "get_event_by_query",
-        [mentions("text", *words)],
+        [mentions("query", *words)],
         answer_mentions=answer or [],
         forbid=["create_event", "delete_event"],
     )
@@ -530,7 +569,7 @@ HOLDOUT: list[Case] = [
         "h_task_tax_by_friday",
         "create",
         ["Нужно до пятницы сдать налоговую декларацию"],
-        created(equals("event_type", "task"), on_date("datetime", "2026-10-23"), mentions("name", "деклар")),
+        created(equals("event_type", "task"), due_on("2026-10-23"), mentions("name", "деклар")),
     ),
     Case(
         "h_doctor_nov3",
@@ -568,13 +607,13 @@ HOLDOUT: list[Case] = [
         "h_task_passport",
         "create",
         ["Добавь задачу оформить загранпаспорт"],
-        created(equals("event_type", "task"), mentions("name", "паспорт")),
+        created(equals("event_type", "task"), no_time(), mentions("name", "паспорт")),
     ),
     Case(
         "h_task_sunday",
         "create",
         ["В воскресенье надо поздравить бабушку"],
-        created(one_of("event_type", "task", "reminder"), on_date("datetime", "2026-10-25")),
+        created(one_of("event_type", "task", "reminder"), on_day("2026-10-25")),
     ),
     # Said on Monday at noon: "в понедельник" is the next Monday.
     Case(
@@ -652,7 +691,7 @@ HOLDOUT: list[Case] = [
         "period",
         ["Какие задачи на этой неделе?"],
         period(
-            covers("2026-10-19T12:00:00+03:00", "2026-10-25T23:59:59+03:00", max_extra=timedelta(hours=13)),
+            covers("2026-10-19T12:00:00+03:00", "2026-10-26T00:00:00+03:00", max_extra=timedelta(hours=13)),
             types_include("task"),
         ),
         seed=SEED,
@@ -822,6 +861,17 @@ HOLDOUT: list[Case] = [
         timezone=YEKB,
     ),
 ]
-HOLDOUT = [replace(case, split="holdout") for case in HOLDOUT]
+# Used to diagnose regressions of the MCP contract change (T2, 2026-10-21) and so moved to tune.
+# New holdout cases for these situations are still to be written.
+MOVED_TO_TUNE = frozenset(
+    {
+        "h_vlad_thursday",
+        "h_multi_doctor_and_son",
+        "h_weekend_plans",
+        "h_meetings_next_week",
+        "h_yekb_today_18",
+    }
+)
+HOLDOUT = [case if case.id in MOVED_TO_TUNE else replace(case, split="holdout") for case in HOLDOUT]
 
 CASES += TUNE_EXTRA + HOLDOUT

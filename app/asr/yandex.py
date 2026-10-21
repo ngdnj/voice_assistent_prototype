@@ -11,9 +11,9 @@ import time
 
 import httpx
 
-from assistant import metrics
-from assistant.asr.audio import decode_pcm16k, pcm_duration_s
-from assistant.asr.base import MAX_DURATION_S, AsrError, AudioTooLongError, Transcript
+from app import metrics
+from app.asr.audio import decode_pcm16k, pcm_duration_s
+from app.asr.base import MAX_DURATION_S, AsrError, AudioTooLongError, Transcript
 
 RECOGNIZE_URL = "https://stt.api.cloud.yandex.net/speech/v1/stt:recognize"
 BACKEND = "yandex"

@@ -1,4 +1,4 @@
-"""Chat model factory."""
+"""Chat model factory: GigaChat API."""
 
 import hashlib
 from collections.abc import Iterator
@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from gigachat.context import session_id_cvar
 from langchain_core.language_models import BaseChatModel
 
-from assistant.config import Settings
+from app.config import Settings
 
 
 @contextmanager
@@ -30,27 +30,7 @@ class MissingCredentialsError(RuntimeError):
 
 
 def build_chat_model(settings: Settings) -> BaseChatModel:
-    if settings.llm_provider == "cloudru":
-        return _cloudru(settings)
-    return _gigachat(settings)
-
-
-def _cloudru(settings: Settings) -> BaseChatModel:
-    from langchain_openai import ChatOpenAI
-
-    if settings.cloudru_api_key is None:
-        raise MissingCredentialsError("CLOUDRU_API_KEY is not set, see .env.example")
-    return ChatOpenAI(
-        model=settings.cloudru_model,
-        api_key=settings.cloudru_api_key,
-        base_url=settings.cloudru_base_url,
-        temperature=settings.llm_temperature,
-        timeout=settings.llm_timeout_s,
-        max_retries=settings.llm_max_retries,
-    )
-
-
-def _gigachat(settings: Settings) -> BaseChatModel:
+    """GigaChat API chat model (AGENTS §3)."""
     from langchain_gigachat import GigaChat
 
     if settings.gigachat_credentials is None:

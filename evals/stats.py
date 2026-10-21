@@ -4,7 +4,7 @@ import statistics
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from assistant.metrics import quantiles
+from app.metrics import quantiles
 
 
 def describe(values: Sequence[float]) -> dict[str, float]:
