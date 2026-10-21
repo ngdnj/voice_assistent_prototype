@@ -1,19 +1,25 @@
-# Python-generated files
+# Python
 __pycache__/
-*.py[oc]
+*.py[cod]
 build/
 dist/
 wheels/
 *.egg-info
-
-# Virtual environments
-.venv
-
-# Local config and data
-.env
-data/
-evals/reports/
+.venv/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.coverage
+htmlcov/
+
+# Local config and secrets
+.env
+.env.*
+!.env.example
 certs/
+
+# Local data and reports
+data/
+evals/reports/
+
+.DS_Store
