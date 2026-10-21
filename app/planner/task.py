@@ -11,7 +11,7 @@ class Task:
     owner_id: str
     title: str
     created_at: datetime
-    id: UUID = field(default_factory=uuid4, init=False)
+    id: UUID = field(default_factory=uuid4)
     status: Literal["active"] = field(default="active", init=False)
 
     def __post_init__(self) -> None:

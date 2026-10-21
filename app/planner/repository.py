@@ -6,6 +6,14 @@ from uuid import UUID
 from app.planner.task import Task
 
 
+class TaskStorageError(Exception):
+    """Task storage is unavailable or contains invalid data."""
+
+
+class TaskAlreadyExistsError(TaskStorageError):
+    """A task ID is already stored; adding must never overwrite it."""
+
+
 class TaskRepository(Protocol):
     async def add(self, task: Task) -> None:
         """Store a task before returning successfully."""

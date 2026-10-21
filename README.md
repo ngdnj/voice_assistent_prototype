@@ -6,8 +6,9 @@
 Реализована минимальная модель задачи в `app/planner/task.py`: UUID, владелец,
 название, начальный статус `active` и явно передаваемое время создания в UTC.
 Добавлены прикладной `TaskService`, async-протокол `TaskRepository` и
-демонстрационный `InMemoryTaskRepository`. Постоянного хранения, работающих
-интеграций и точек запуска сервисов пока нет.
+демонстрационный `InMemoryTaskRepository` и адаптер `RedisTaskRepository`.
+Redis временно используется как основное хранилище задач прототипа.
+Точек запуска API/worker и интеграций с MAX/AI пока нет.
 
 Пример создания в памяти (Python 3.12+):
 
@@ -50,7 +51,109 @@ In-memory хранилище предназначено только для те
 Для смены хранилища передайте реализацию двух async-методов `add` и `get`;
 сервис и правила модели менять не требуется.
 
-Проверки без внешних зависимостей: `python3 -m unittest discover -s tests -v`.
+Установка закреплённых зависимостей: `uv sync --locked`.
+Проверки: `uv run --locked python -m unittest discover -s tests -v`.
+Интеграционный тест Redis включается отдельно, остальные тесты не требуют сервера.
+
+## Локальный Redis
+
+```bash
+cp .env.example .env
+docker compose up -d --wait redis
+uv sync --locked
+uv run --locked --env-file .env python -m app.storage.redis
+```
+
+Compose запускает Redis 7.4.2 только на `127.0.0.1`, без пароля и без
+постоянного тома: это локальный экземпляр для разработки, не production.
+Остановка: `docker compose stop redis`.
+Если порт занят, измените `REDIS_PORT` в `.env`.
+
+`RedisSettings.from_env()` читает `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`,
+`REDIS_USERNAME`, `REDIS_PASSWORD`, `REDIS_CONNECT_TIMEOUT` и
+`REDIS_COMMAND_TIMEOUT`. Приложение само не читает `.env`; `uv --env-file`
+передаёт его значения в окружение. Оба таймаута по умолчанию — 2 секунды:
+подключение и сетевые операции команд. Автоматические повторы команд отключены.
+Не логируйте настройки подключения, пароль и исключения с чувствительными данными.
+
+Жизненный цикл будущего процесса (один клиент и его pool на всё время работы):
+
+```python
+from app.storage.redis import RedisSettings, check_redis, redis_connection
+
+async def run_process():
+    async with redis_connection(RedisSettings.from_env()) as redis:
+        assert await check_redis(redis)
+        # Передать redis нужным инфраструктурным компонентам и работать здесь.
+    # aclose() закрывает клиент и его pool, в том числе при ошибке/отмене.
+```
+
+Вход в контекст выполняет `PING`; ошибка подключения прерывает запуск и
+закрывает ресурсы. Импорт модуля не создаёт клиента. В будущих API/worker
+контекст должен охватывать жизнь процесса, а не каждый запрос.
+Документация клиента: [redis-py asyncio lifecycle](https://redis.readthedocs.io/en/v8.1.0/examples/asyncio_examples.html).
+
+Интеграционный прогон на **отдельном тестовом Redis** (например, локальном Compose):
+
+```bash
+RUN_REDIS_INTEGRATION=1 uv run --locked --env-file .env python -m unittest discover -s tests -v
+```
+
+Тест использует уникальный ключ `it-gorky:test:redis:<UUID>:roundtrip`,
+проверяет PING/SET/GET и удаляет только свой ключ. TTL 60 секунд ограничивает
+время жизни ключа при аварийной остановке; `FLUSHDB` не используется.
+Очередь пока не реализована.
+
+## Задачи в Redis: временное хранилище прототипа
+
+`RedisTaskRepository` реализует существующий `TaskRepository`; сервис и его
+бизнес-правила не импортируют Redis. Клиент передаётся извне и закрывается
+владельцем lifecycle, а не репозиторием.
+
+```python
+from datetime import UTC, datetime
+from app.planner.service import TaskService
+from app.storage.redis import RedisSettings, redis_connection
+from app.storage.redis_tasks import RedisTaskRepository
+
+async def task_example():
+    async with redis_connection(RedisSettings.from_env()) as client:
+        service = TaskService(
+            repository=RedisTaskRepository(client),
+            clock=lambda: datetime(2026, 10, 21, 9, 30, tzinfo=UTC),
+        )
+        task = await service.create_task(owner_id="user-42", title="Отчёт")
+        assert await service.get_task(task_id=task.id, owner_id="user-42") == task
+        assert await service.get_task(task_id=task.id, owner_id="other") is None
+```
+
+Схема ключа: `it-gorky:v1:task:<UUID>`. Значение — JSON с полями `id`,
+`owner_id`, `title`, `status`, `created_at`: UUID и статус записываются строками,
+время — ISO 8601 с UTC-смещением `+00:00`, включая микросекунды.
+`v1` обозначает версию формата. Для изолированных тестов допускается свой
+`key_prefix`, например `it-gorky:test:<UUID>`; версия и суффикс задачи сохраняются.
+Владельца проверяет репозиторий после чтения записи; чужая задача даёт `None`.
+
+Запись выполняется одной атомарной командой `SET NX`, **без TTL**.
+Существующий UUID нельзя перезаписать, даже при другом владельце:
+выдаётся `TaskAlreadyExistsError`. Это защита от перезаписи по UUID,
+не идемпотентность по `action_id`: повтор `service.create_task` создаёт новую задачу.
+Повреждённый JSON, неверные поля/UUID/статус/UTC-время и неверный Redis-тип
+дают `TaskStorageError`, а не отсутствие записи. Ошибки Redis также преобразуются
+в `TaskStorageError` без включения исходных данных в сообщение.
+
+Это временное отклонение от целевой архитектуры с PostgreSQL.
+Сохранность при перезапуске Redis зависит от настроек persistence (RDB/AOF)
+и тома данных. Текущий Compose отключает persistence и не подключает том:
+после перезапуска Redis задачи будут потеряны. Отсутствие TTL не предотвращает
+потери при сбоях или вытеснение ключей политикой Redis. Гарантий отсутствия
+потерь нет; persistence и том не заменяют резервное копирование.
+
+Интеграционные тесты адаптера запускаются той же командой с
+`RUN_REDIS_INTEGRATION=1`. Они проверяют новый экземпляр репозитория и клиента,
+все поля, TTL `-1`, отсутствие/чужого владельца, конкурентное добавление,
+перезапись и повреждения. Каждый тест удаляет только перечисленные им ключи
+в своём уникальном пространстве; пользовательские задачи TTL не получают.
 
 ## Структура
 
@@ -105,5 +208,5 @@ GigaAM и Yandex SpeechKit. Mini App — React/TypeScript/Vite/MAX Bridge;
 структурированные логи, Prometheus и Grafana.
 
 Создание задачи в памяти и проверки её правил реализованы.
-При появлении зависимостей добавим `pyproject.toml` и `uv.lock`, затем команды
-запуска и проверки через pytest, Ruff и mypy. Сейчас установка и запуск не предусмотрены.
+Зависимость `redis` закреплена в `pyproject.toml` и `uv.lock`.
+pytest, Ruff и mypy пока не настроены. Точки запуска API/worker отсутствуют.
