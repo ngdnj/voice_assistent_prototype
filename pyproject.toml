@@ -2,4 +2,66 @@
 name = "it-gorky-assistant"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["redis>=8.1,<9"]
+dependencies = [
+    "redis>=8.1,<9",
+    # Role 3 (LLM + ASR): app/llm, app/asr, app/config.py, app/metrics.py, evals
+    "fastmcp>=4.1",
+    "httpx>=0.28",
+    "langchain>=1.4",
+    "langchain-gigachat>=0.5",
+    "prometheus-client>=0.26",
+    "pydantic-settings>=2.16",
+    "tzdata>=2026.5",
+]
+
+[project.optional-dependencies]
+# Local ASR on CPU (GigaAM, pulls torch); not needed for the text path.
+asr = ["gigaam[torch]"]
+# Only for comparing models in evals via Cloud.ru (evals/cloudru.py); not the product stack.
+compare = ["langchain-openai>=1.0"]
+
+[dependency-groups]
+dev = [
+    "mypy>=2.4.0",
+    "psutil>=7",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "ruff>=0.17.1",
+]
+
+[tool.uv.sources]
+gigaam = { git = "https://github.com/salute-developers/GigaAM", rev = "7447938d791c4f3e643386ee22c33777004293a5" }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+# This config came with role 3. Other roles' files are not checked by it until they opt in
+# (remove their paths here); markdown code blocks are not formatted.
+extend-exclude = [
+    "*.md",
+    "app/planner",
+    "app/storage",
+    "tests/test_redis.py",
+    "tests/test_redis_tasks.py",
+    "tests/test_task.py",
+    "tests/test_task_service.py",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]  # Cyrillic in strings/comments is intentional
+
+[tool.ruff.lint.per-file-ignores]
+"app/llm/prompts.py" = ["E501"]  # prompt text is kept as natural paragraphs
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
+# Role 3 paths; other roles add theirs.
+files = ["app/llm", "app/asr", "app/config.py", "app/metrics.py", "evals"]
