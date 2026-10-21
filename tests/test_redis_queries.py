@@ -13,11 +13,10 @@ from app.planner.reminder_repository import ReminderAlreadyExistsError, Reminder
 from app.planner.repository import TaskAlreadyExistsError, TaskStorageError
 from app.planner.task import Task
 from app.storage.redis import RedisSettings, redis_connection
-from app.storage.redis_index import index_key, index_member
+from app.storage.redis_index import index_key
 from app.storage.redis_meetings import RedisMeetingRepository
 from app.storage.redis_reminders import RedisReminderRepository
 from app.storage.redis_tasks import RedisTaskRepository
-
 
 BASE = datetime(2026, 10, 22, 8, tzinfo=UTC)
 KINDS = ("task", "meeting", "reminder")
@@ -49,8 +48,13 @@ class RedisQueryTests(unittest.IsolatedAsyncioTestCase):
         if kind == "task":
             return Task(**common, title=text, created_at=moment)
         if kind == "meeting":
-            return Meeting(**common, title=text, created_at=BASE - timedelta(days=1),
-                           starts_at=moment, ends_at=moment + timedelta(hours=1))
+            return Meeting(
+                **common,
+                title=text,
+                created_at=BASE - timedelta(days=1),
+                starts_at=moment,
+                ends_at=moment + timedelta(hours=1),
+            )
         return Reminder(**common, text=text, created_at=BASE - timedelta(days=1), remind_at=moment)
 
     def keys_for(self, kind: str, record) -> tuple[str, str]:
@@ -69,18 +73,31 @@ class RedisQueryTests(unittest.IsolatedAsyncioTestCase):
                 repo = self.repositories[kind]
                 self.assertEqual(await repo.list(RecordQuery(owner_id="user-42")), [])
                 for number, delta, owner in (
-                    (4, 1, "user-42"), (2, 0, "user-42"),
-                    (1, 0, "user-42"), (3, 0, "other"), (5, 2, "user-42"),
+                    (4, 1, "user-42"),
+                    (2, 0, "user-42"),
+                    (1, 0, "user-42"),
+                    (3, 0, "other"),
+                    (5, 2, "user-42"),
                 ):
-                    await self.add(kind, self.record(kind, number, BASE + timedelta(microseconds=delta), owner=owner))
-                query = RecordQuery(owner_id="user-42", start_time=BASE, end_time=BASE + timedelta(microseconds=2))
+                    await self.add(
+                        kind, self.record(kind, number, BASE + timedelta(microseconds=delta), owner=owner)
+                    )
+                query = RecordQuery(
+                    owner_id="user-42", start_time=BASE, end_time=BASE + timedelta(microseconds=2)
+                )
                 self.assertEqual([r.id.int for r in await repo.list(query)], [1, 2, 4])
                 self.assertEqual([r.id.int for r in await repo.list(replace(query, limit=1, offset=1))], [2])
                 self.assertEqual(await repo.list(replace(query, offset=100)), [])
                 self.assertEqual(await repo.list(RecordQuery(owner_id="nobody")), [])
-                self.assertEqual([r.id.int for r in await repo.list(RecordQuery(
-                    owner_id="user-42", start_time=BASE + timedelta(microseconds=2)
-                ))], [5])
+                self.assertEqual(
+                    [
+                        r.id.int
+                        for r in await repo.list(
+                            RecordQuery(owner_id="user-42", start_time=BASE + timedelta(microseconds=2))
+                        )
+                    ],
+                    [5],
+                )
 
     async def test_casefold_search_filters_before_pagination(self) -> None:
         for kind in KINDS:
@@ -90,7 +107,9 @@ class RedisQueryTests(unittest.IsolatedAsyncioTestCase):
                 repo = self.repositories[kind]
                 query = RecordQuery(owner_id="user-42", query=" ОТЧЁТ ", offset=1, limit=1)
                 self.assertEqual([r.id.int for r in await repo.list(query)], [3])
-                self.assertEqual([r.id.int for r in await repo.list(replace(query, query="STRASSE", offset=0))], [4])
+                self.assertEqual(
+                    [r.id.int for r in await repo.list(replace(query, query="STRASSE", offset=0))], [4]
+                )
                 self.assertEqual(await repo.list(replace(query, query="нет совпадения")), [])
                 self.assertEqual(await repo.list(replace(query, end_time=BASE)), [])
 
@@ -103,9 +122,16 @@ class RedisQueryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(await repo.list(RecordQuery(owner_id="user-42", limit=100))), 100)
                 with self.assertRaises(QueryTooBroadError):
                     await repo.list(RecordQuery(owner_id="user-42", query="отчёт"))
-                self.assertEqual(len(await repo.list(RecordQuery(
-                    owner_id="user-42", query="отчёт", end_time=BASE + timedelta(microseconds=2)
-                ))), 1)
+                self.assertEqual(
+                    len(
+                        await repo.list(
+                            RecordQuery(
+                                owner_id="user-42", query="отчёт", end_time=BASE + timedelta(microseconds=2)
+                            )
+                        )
+                    ),
+                    1,
+                )
 
     async def test_atomic_write_and_duplicate_leave_indexes_consistent(self) -> None:
         for kind in KINDS:
@@ -127,13 +153,15 @@ class RedisQueryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await self.client.exists(other_index), 0)
                 self.assertEqual(await self.client.ttl(index), -1)
                 self.assertEqual(await self.client.ttl(key), -1)
-                self.assertEqual(await self.repositories[kind].list(RecordQuery(owner_id="user-42")), [record])
+                self.assertEqual(
+                    await self.repositories[kind].list(RecordQuery(owner_id="user-42")), [record]
+                )
 
     async def test_index_corruption_is_not_silently_hidden(self) -> None:
         for kind in KINDS:
             with self.subTest(kind=kind):
                 record = self.record(kind, 1, BASE)
-                key, index = self.keys_for(kind, record)
+                key, _index = self.keys_for(kind, record)
                 await self.add(kind, record)
                 payload = json.loads(await self.client.get(key))
                 payload["owner_id"] = "other"

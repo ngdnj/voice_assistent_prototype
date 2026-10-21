@@ -7,7 +7,6 @@ from redis.asyncio import Redis
 
 from app.planner.query import MAX_SEARCH_CANDIDATES, QueryTooBroadError, RecordQuery
 
-
 # Validate key types before writes: Redis Lua scripts do not roll back runtime errors.
 ADD_INDEXED = """
 if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
@@ -44,8 +43,16 @@ async def read_index(client: Redis, key: str, query: RecordQuery) -> list[str]:
     lower = "-" if query.start_time is None else f"[{query.start_time.isoformat(timespec='microseconds')}|"
     upper = "+" if query.end_time is None else f"({query.end_time.isoformat(timespec='microseconds')}|"
     if query.query is None:
-        return await client.zrangebylex(key, lower, upper, start=query.offset, num=query.limit)
-    members = await client.zrangebylex(key, lower, upper, start=0, num=MAX_SEARCH_CANDIDATES + 1)
-    if len(members) > MAX_SEARCH_CANDIDATES:
-        raise QueryTooBroadError("Search exceeds 1000 candidates; narrow the period")
-    return members
+        members = await client.zrangebylex(key, lower, upper, start=query.offset, num=query.limit)
+    else:
+        members = await client.zrangebylex(key, lower, upper, start=0, num=MAX_SEARCH_CANDIDATES + 1)
+        if len(members) > MAX_SEARCH_CANDIDATES:
+            raise QueryTooBroadError("Search exceeds 1000 candidates; narrow the period")
+    # redis-py types allow bytes even though the shared client decodes responses.
+    # Reject a misconfigured client explicitly, rather than returning invalid data.
+    decoded: list[str] = []
+    for member in members:
+        if not isinstance(member, str):
+            raise ValueError("Index client must use decode_responses=True")
+        decoded.append(member)
+    return decoded
