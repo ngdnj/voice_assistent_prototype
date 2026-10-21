@@ -6,15 +6,15 @@
 `app/planner/task.py`. По текущему требованию начальный статус — `active`;
 прежний `todo` остаётся целевым статусом Mini App, соответствие ещё не определено.
 Внутреннее поле `title` соответствует внешнему `name`. Контекст операции,
-PostgreSQL-хранение, идемпотентность по action_id и полный набор ошибок ниже ещё не реализованы;
+PostgreSQL-хранение и полный набор ошибок ниже ещё не реализованы;
 модель отклоняет неверные значения через `ValueError`.
 Прикладной `TaskService` в `app/planner/service.py` получает явно репозиторий
-и часы: `Callable[[], datetime]`. Его async-метод `create_task(owner_id, title)`
+и часы: `Callable[[], datetime]`. Его async-метод `create_task(owner_id, title, operation_id)`
 создаёт модель и ожидает `repository.add(task)` перед возвратом результата;
 `get_task(task_id, owner_id)` возвращает `Task | None`.
 Здесь имена аргументов приведены для краткости: вызовы используют именованные параметры.
 Протокол `TaskRepository` в `app/planner/repository.py` содержит
-`async add(task: Task) -> None` и
+`async add(task: Task, *, operation: CreationOperation | None = None) -> Task` и
 `async get(*, task_id: UUID, owner_id: str) -> Task | None` и
 `async list(query: RecordQuery) -> list[Task]`.
 Аналогичный метод list добавлен в протоколы встреч и напоминаний.
@@ -68,6 +68,16 @@ Redis-адаптер преобразует ошибки инфраструкт�
 
 ## Доверенный контекст и идентификаторы
 
+Реализована Redis-идемпотентность создания: обязательный `operation_id` в
+сервисе (аналог прежнего `action_id`), область владельца **и типа операции**,
+нормализованные данные и возврат исходного результата.
+`get_created(owner_id=..., operation=...)` проверяет уже сохранённое действие;
+`add(record, operation=...)` атомарно записывает модель, индекс и результат.
+Без метаданных add остаётся низкоуровневым неидемпотентным импортом/примером.
+TTL у результатов операций не установлен. Детали и построчное объяснение Lua:
+[idempotency.md](idempotency.md). Следующие упоминания PostgreSQL — целевой
+долговечный вариант, а не текущая реализация.
+
 Владелец передаётся отдельно от пользовательских полей задачи. Backend **не
 подтверждает личность по произвольному полю `user_id`** из JSON, текста или
 аргументов модели. Доверенный адаптер устанавливает внутренний `owner_id`
@@ -86,7 +96,8 @@ Redis-адаптер преобразует ошибки инфраструкт�
 Идентификаторы задаёт приложение, а не модель; дедупликация входного события
 адаптером не заменяет защиту самой операции от повторного выполнения.
 
-Ключ повторного выполнения — `(owner_id, action_id)`. Первое успешное создание
+Ключ повторного выполнения — `(owner_id, тип операции, operation_id)`;
+`action_id` в прежних схемах обозначает тот же идентификатор логического действия. Первое успешное создание
 атомарно сохраняет задачу и результат действия в PostgreSQL. Повтор с той же
 операцией и теми же нормализованными бизнес-аргументами возвращает прежний
 результат; изменение типа операции или аргументов даёт `operation_conflict`.
@@ -119,7 +130,7 @@ Redis-адаптер преобразует ошибки инфраструкт�
 ### Напоминания: данные и доставка
 
 `ReminderService` (`app/planner/reminder_service.py`) получает явно репозиторий
-и часы. `create_reminder(*, owner_id, text, remind_at)` проверяет данные,
+и часы. `create_reminder(*, owner_id, text, remind_at, operation_id)` проверяет данные,
 сохраняет через `ReminderRepository.add`, возвращает `Reminder`.
 `get_reminder(*, reminder_id, owner_id)` возвращает доступную запись либо `None`.
 Модель — `app/planner/reminder.py`, протокол и ошибки —
@@ -149,7 +160,7 @@ Redis хранит JSON по `<key_prefix>:v1:reminder:<UUID>` без TTL и б�
 Создание/получение встреч доступно через отдельный `MeetingService`
 (`app/planner/meeting_service.py`) с явно переданными часами и
 `MeetingRepository` (`app/planner/meeting_repository.py`). Методы:
-`create_meeting(*, owner_id, title, starts_at, ends_at)` и
+`create_meeting(*, owner_id, title, starts_at, ends_at, operation_id)` и
 `get_meeting(*, meeting_id, owner_id)`. Владелец приходит из того же доверенного
 контекста адаптера. Отсутствующая и чужая встреча дают `None`.
 

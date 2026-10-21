@@ -3,6 +3,7 @@
 from typing import Protocol
 from uuid import UUID
 
+from app.planner.operation import CreationOperation
 from app.planner.query import RecordQuery
 from app.planner.reminder import Reminder
 
@@ -16,7 +17,7 @@ class ReminderAlreadyExistsError(ReminderStorageError):
 
 
 class ReminderRepository(Protocol):
-    async def add(self, reminder: Reminder) -> None:
+    async def add(self, reminder: Reminder, *, operation: CreationOperation | None = None) -> Reminder:
         """Store reminder data without scheduling or delivering it."""
         ...
 
@@ -26,4 +27,8 @@ class ReminderRepository(Protocol):
 
     async def list(self, query: RecordQuery) -> list[Reminder]:
         """List or search accessible records in stable time/ID order."""
+        ...
+
+    async def get_created(self, *, owner_id: str, operation: CreationOperation) -> Reminder | None:
+        """Replay a matching creation or raise OperationConflictError."""
         ...
