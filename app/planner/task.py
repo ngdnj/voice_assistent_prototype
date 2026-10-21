@@ -1,9 +1,11 @@
 """Minimal task model independent of transports and storage."""
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Literal
 from uuid import UUID, uuid4
+
+from app.planner.time import to_utc
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -20,10 +22,8 @@ class Task:
         title = self.title.strip()
         if not title:
             raise ValueError("title must not be blank")
-        if self.created_at.utcoffset() is None:
-            raise ValueError("created_at must be timezone-aware")
         object.__setattr__(self, "title", title)
-        object.__setattr__(self, "created_at", self.created_at.astimezone(UTC))
+        object.__setattr__(self, "created_at", to_utc(self.created_at))
 
 
 def create_task(*, owner_id: str, title: str, created_at: datetime) -> Task:

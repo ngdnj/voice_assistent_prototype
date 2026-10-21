@@ -13,6 +13,7 @@ from app.planner.repository import TaskAlreadyExistsError, TaskStorageError
 from app.planner.service import TaskService
 from app.planner.task import create_task
 from app.storage.redis import RedisSettings, redis_connection
+from app.storage.redis_index import index_key
 from app.storage.redis_tasks import RedisTaskRepository
 
 
@@ -21,14 +22,14 @@ CREATED_AT = datetime(2026, 10, 21, 9, 30, 12, 123456, tzinfo=UTC)
 
 class RedisTaskErrorTests(unittest.IsolatedAsyncioTestCase):
     async def test_infrastructure_errors_are_storage_errors(self) -> None:
-        for method in ("set", "get"):
+        for method in ("eval", "get"):
             with self.subTest(method=method):
                 client = AsyncMock()
                 getattr(client, method).side_effect = ConnectionError("private details")
                 repository = RedisTaskRepository(client)
                 task = create_task(owner_id="user-42", title="Отчёт", created_at=CREATED_AT)
                 with self.assertRaises(TaskStorageError) as caught:
-                    if method == "set":
+                    if method == "eval":
                         await repository.add(task)
                     else:
                         await repository.get(task_id=task.id, owner_id=task.owner_id)
@@ -50,6 +51,9 @@ class RedisTaskIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.repository = RedisTaskRepository(self.client, key_prefix=self.prefix)
 
     async def cleanup_keys(self) -> None:
+        self.keys.extend(index_key(self.prefix, kind, owner)
+                         for kind in ("task", "meeting", "reminder")
+                         for owner in ("user-42", "other"))
         if self.keys:
             await self.client.delete(*self.keys)
 
