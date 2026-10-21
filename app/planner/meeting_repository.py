@@ -3,6 +3,7 @@
 from typing import Protocol
 from uuid import UUID
 
+from app.planner.query import RecordQuery
 from app.planner.meeting import Meeting
 
 
@@ -21,4 +22,8 @@ class MeetingRepository(Protocol):
 
     async def get(self, *, meeting_id: UUID, owner_id: str) -> Meeting | None:
         """Return the owner's meeting, or None if missing or inaccessible."""
+        ...
+
+    async def list(self, query: RecordQuery) -> list[Meeting]:
+        """List or search accessible records in stable time/ID order."""
         ...

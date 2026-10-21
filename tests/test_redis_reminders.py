@@ -13,6 +13,7 @@ from app.planner.reminder import create_reminder
 from app.planner.reminder_repository import ReminderAlreadyExistsError, ReminderStorageError
 from app.planner.reminder_service import ReminderService
 from app.storage.redis import RedisSettings, redis_connection
+from app.storage.redis_index import index_key
 from app.storage.redis_reminders import RedisReminderRepository
 
 
@@ -22,13 +23,13 @@ DUE = CREATED + timedelta(hours=1)
 
 class RedisReminderErrorTests(unittest.IsolatedAsyncioTestCase):
     async def test_infrastructure_errors(self) -> None:
-        for method in ("set", "get"):
+        for method in ("eval", "get"):
             with self.subTest(method=method):
                 client = AsyncMock()
                 getattr(client, method).side_effect = ConnectionError("private data")
                 repository = RedisReminderRepository(client)
                 with self.assertRaises(ReminderStorageError) as caught:
-                    if method == "set":
+                    if method == "eval":
                         await repository.add(create_reminder(
                             owner_id="user-42", text="Позвонить", remind_at=DUE, created_at=CREATED
                         ))
@@ -55,6 +56,9 @@ class RedisReminderIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def cleanup_keys(self) -> None:
+        self.keys.extend(index_key(self.prefix, kind, owner)
+                         for kind in ("task", "meeting", "reminder")
+                         for owner in ("user-42", "other"))
         if self.keys:
             await self.client.delete(*self.keys)
 

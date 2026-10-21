@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import datetime
 from uuid import UUID
 
+from app.planner.query import RecordQuery
 from app.planner.meeting import Meeting, create_meeting
 from app.planner.meeting_repository import MeetingRepository
 
@@ -27,3 +28,6 @@ class MeetingService:
 
     async def get_meeting(self, *, meeting_id: UUID, owner_id: str) -> Meeting | None:
         return await self._repository.get(meeting_id=meeting_id, owner_id=owner_id)
+
+    async def list_meetings(self, query: RecordQuery) -> list[Meeting]:
+        return await self._repository.list(query)

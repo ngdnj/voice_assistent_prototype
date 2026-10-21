@@ -14,6 +14,7 @@ from app.planner.meeting_repository import MeetingAlreadyExistsError, MeetingSto
 from app.planner.meeting_service import MeetingService
 from app.planner.task import Task
 from app.storage.redis import RedisSettings, redis_connection
+from app.storage.redis_index import index_key
 from app.storage.redis_meetings import RedisMeetingRepository
 from app.storage.redis_tasks import RedisTaskRepository
 
@@ -25,13 +26,13 @@ END = START + timedelta(minutes=45)
 
 class RedisMeetingErrorTests(unittest.IsolatedAsyncioTestCase):
     async def test_infrastructure_errors(self) -> None:
-        for method in ("set", "get"):
+        for method in ("eval", "get"):
             with self.subTest(method=method):
                 client = AsyncMock()
                 getattr(client, method).side_effect = ConnectionError("private data")
                 repository = RedisMeetingRepository(client)
                 with self.assertRaises(MeetingStorageError) as caught:
-                    if method == "set":
+                    if method == "eval":
                         await repository.add(create_meeting(
                             owner_id="user-42", title="Обсуждение", starts_at=START,
                             ends_at=END, created_at=CREATED,
@@ -60,6 +61,9 @@ class RedisMeetingIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def cleanup_keys(self) -> None:
+        self.keys.extend(index_key(self.prefix, kind, owner)
+                         for kind in ("task", "meeting", "reminder")
+                         for owner in ("user-42", "other"))
         if self.keys:
             await self.client.delete(*self.keys)
 

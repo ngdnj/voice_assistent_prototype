@@ -13,9 +13,14 @@ PostgreSQL-хранение, идемпотентность по action_id и п
 создаёт модель и ожидает `repository.add(task)` перед возвратом результата;
 `get_task(task_id, owner_id)` возвращает `Task | None`.
 Здесь имена аргументов приведены для краткости: вызовы используют именованные параметры.
-Протокол `TaskRepository` в `app/planner/repository.py` содержит только
+Протокол `TaskRepository` в `app/planner/repository.py` содержит
 `async add(task: Task) -> None` и
-`async get(*, task_id: UUID, owner_id: str) -> Task | None`.
+`async get(*, task_id: UUID, owner_id: str) -> Task | None` и
+`async list(query: RecordQuery) -> list[Task]`.
+Аналогичный метод list добавлен в протоколы встреч и напоминаний.
+Сервисы предоставляют `list_tasks`, `list_meetings`, `list_reminders`.
+Правила владельца, периода, поиска и страниц, а также обязательный backfill
+старых Redis-записей описаны в [record-queries.md](record-queries.md).
 Репозиторий обязан фильтровать владельца: чужая и отсутствующая задача
 одинаково возвращают `None`. Ошибки репозитория сейчас передаются без перехвата;
 Redis-адаптер преобразует ошибки инфраструктуры и повреждение записи в

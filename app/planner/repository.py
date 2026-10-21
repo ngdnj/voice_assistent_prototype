@@ -3,6 +3,7 @@
 from typing import Protocol
 from uuid import UUID
 
+from app.planner.query import RecordQuery
 from app.planner.task import Task
 
 
@@ -21,4 +22,8 @@ class TaskRepository(Protocol):
 
     async def get(self, *, task_id: UUID, owner_id: str) -> Task | None:
         """Return the owner's task, or None for missing or inaccessible tasks."""
+        ...
+
+    async def list(self, query: RecordQuery) -> list[Task]:
+        """List or search accessible records in stable time/ID order."""
         ...

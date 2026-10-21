@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import datetime
 from uuid import UUID
 
+from app.planner.query import RecordQuery
 from app.planner.reminder import Reminder, create_reminder
 from app.planner.reminder_repository import ReminderRepository
 
@@ -26,3 +27,6 @@ class ReminderService:
 
     async def get_reminder(self, *, reminder_id: UUID, owner_id: str) -> Reminder | None:
         return await self._repository.get(reminder_id=reminder_id, owner_id=owner_id)
+
+    async def list_reminders(self, query: RecordQuery) -> list[Reminder]:
+        return await self._repository.list(query)

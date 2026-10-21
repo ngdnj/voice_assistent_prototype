@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import datetime
 from uuid import UUID
 
+from app.planner.query import RecordQuery
 from app.planner.repository import TaskRepository
 from app.planner.task import Task, create_task
 
@@ -24,3 +25,6 @@ class TaskService:
     async def get_task(self, *, task_id: UUID, owner_id: str) -> Task | None:
         """Return an accessible task without revealing other owners' records."""
         return await self._repository.get(task_id=task_id, owner_id=owner_id)
+
+    async def list_tasks(self, query: RecordQuery) -> list[Task]:
+        return await self._repository.list(query)

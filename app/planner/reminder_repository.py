@@ -3,6 +3,7 @@
 from typing import Protocol
 from uuid import UUID
 
+from app.planner.query import RecordQuery
 from app.planner.reminder import Reminder
 
 
@@ -21,4 +22,8 @@ class ReminderRepository(Protocol):
 
     async def get(self, *, reminder_id: UUID, owner_id: str) -> Reminder | None:
         """Return the owner's reminder or None if missing or inaccessible."""
+        ...
+
+    async def list(self, query: RecordQuery) -> list[Reminder]:
+        """List or search accessible records in stable time/ID order."""
         ...
