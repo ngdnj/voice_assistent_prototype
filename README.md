@@ -106,7 +106,13 @@ RUN_REDIS_INTEGRATION=1 uv run --locked --env-file .env python -m unittest disco
 Тест использует уникальный ключ `it-gorky:test:redis:<UUID>:roundtrip`,
 проверяет PING/SET/GET и удаляет только свой ключ. TTL 60 секунд ограничивает
 время жизни ключа при аварийной остановке; `FLUSHDB` не используется.
-Очередь пока не реализована.
+Очередь заданий агента пока не реализована. Для уведомлений подготовлен
+[контракт Redis Stream для MAX](docs/notification-stream.md): envelope v1,
+consumer group, результаты/ACK, восстановление pending и dead-letter.
+MAX-клиента и production-потребителя здесь нет; демонстратор находится только
+в `tests/notification_consumer.py` и выполняет один шаг без внешней отправки.
+Сбой после внешней отправки и до ACK может привести к дублю — Stream не даёт
+exactly-once доставку.
 
 ## Задачи в Redis: временное хранилище прототипа
 
