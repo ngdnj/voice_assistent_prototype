@@ -48,6 +48,7 @@ Mini App предусматривает период, вкладки задач/
 `backend/src/assistant/` и `backend/tests/`; проверки размещаются в `tests/`.
 Остальные согласованные требования сохраняются, правила работы — в [AGENTS.md](AGENTS.md).
 Ответственность модулей и путь запроса описаны в [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Контекст системы, процессы и компоненты API показаны в [C4-представлениях](docs/C4.md).
 
 Целевой стек: Python 3.12, FastAPI/Pydantic, LangChain/GigaChat, FastMCP,
 PostgreSQL/SQLAlchemy/asyncpg/Alembic, Redis Streams. Поиск MVP — PostgreSQL FTS
