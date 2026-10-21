@@ -13,23 +13,27 @@ from app.planner.service import TaskService
 from app.planner.task import Task
 from app.storage.memory import InMemoryTaskRepository
 
-
 BASE = datetime(2026, 10, 22, 8, tzinfo=UTC)
 
 
 class RecordQueryTests(unittest.TestCase):
     def test_validation(self) -> None:
         for values in (
-            {"owner_id": " "}, {"limit": 0}, {"limit": 101}, {"limit": True},
-            {"offset": -1}, {"offset": 10001}, {"offset": 1.5},
-            {"query": " "}, {"query": "x" * 201},
+            {"owner_id": " "},
+            {"limit": 0},
+            {"limit": 101},
+            {"limit": True},
+            {"offset": -1},
+            {"offset": 10001},
+            {"offset": 1.5},
+            {"query": " "},
+            {"query": "x" * 201},
             {"start_time": BASE, "end_time": BASE},
             {"start_time": BASE + timedelta(seconds=1), "end_time": BASE},
             {"start_time": BASE.replace(tzinfo=None)},
         ):
-            with self.subTest(values=values):
-                with self.assertRaises(ValueError):
-                    RecordQuery(**{"owner_id": "user-42", **values})
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                RecordQuery(**{"owner_id": "user-42", **values})
 
 
 class RecordServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -51,18 +55,18 @@ class RecordServiceTests(unittest.IsolatedAsyncioTestCase):
         repository = InMemoryTaskRepository()
         service = TaskService(repository=repository, clock=lambda: BASE)
         for record_id, owner, title in (
-            (3, "user-42", "Третий"), (2, "other", "Отчёт"),
-            (1, "user-42", "ОтЧёТ"), (4, "user-42", "Другой отчёт"),
+            (3, "user-42", "Третий"),
+            (2, "other", "Отчёт"),
+            (1, "user-42", "ОтЧёТ"),
+            (4, "user-42", "Другой отчёт"),
         ):
-            await repository.add(Task(
-                id=UUID(int=record_id), owner_id=owner, title=title, created_at=BASE
-            ))
-        self.assertEqual([r.id.int for r in await service.list_tasks(RecordQuery(
-            owner_id="user-42", limit=2, offset=1
-        ))], [3, 4])
-        self.assertEqual([r.id.int for r in await service.list_tasks(RecordQuery(
-            owner_id="user-42", query=" ОТЧЁТ "
-        ))], [1, 4])
-        self.assertEqual(await service.list_tasks(RecordQuery(
-            owner_id="user-42", end_time=BASE
-        )), [])
+            await repository.add(Task(id=UUID(int=record_id), owner_id=owner, title=title, created_at=BASE))
+        self.assertEqual(
+            [r.id.int for r in await service.list_tasks(RecordQuery(owner_id="user-42", limit=2, offset=1))],
+            [3, 4],
+        )
+        self.assertEqual(
+            [r.id.int for r in await service.list_tasks(RecordQuery(owner_id="user-42", query=" ОТЧЁТ "))],
+            [1, 4],
+        )
+        self.assertEqual(await service.list_tasks(RecordQuery(owner_id="user-42", end_time=BASE)), [])

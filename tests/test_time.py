@@ -73,9 +73,7 @@ class TimeTests(unittest.TestCase):
                 start, end = day_bounds_utc(day, "Europe/Berlin")
                 self.assertEqual(end - start, timedelta(hours=hours))
                 self.assertEqual(start.astimezone(ZoneInfo("Europe/Berlin")).date(), day)
-                self.assertEqual(
-                    end.astimezone(ZoneInfo("Europe/Berlin")).date(), day + timedelta(days=1)
-                )
+                self.assertEqual(end.astimezone(ZoneInfo("Europe/Berlin")).date(), day + timedelta(days=1))
 
     def test_interval_compares_instants_and_rejects_naive_bounds(self) -> None:
         start, end = day_bounds_utc(date(2026, 10, 22), "Europe/Moscow")
@@ -86,9 +84,8 @@ class TimeTests(unittest.TestCase):
             (start, start.replace(tzinfo=None), end),
             (start, start, end.replace(tzinfo=None)),
         ):
-            with self.subTest(values=values):
-                with self.assertRaises(ValueError):
-                    is_in_period(*values)
+            with self.subTest(values=values), self.assertRaises(ValueError):
+                is_in_period(*values)
 
     def test_gap_and_fold_rejected(self) -> None:
         for wall_time, error in (
@@ -118,6 +115,5 @@ class TimeTests(unittest.TestCase):
             (date(2026, 3, 8), "America/Havana", NonexistentLocalTimeError),
             (date(2026, 11, 1), "America/Havana", AmbiguousLocalTimeError),
         ):
-            with self.subTest(day=day, zone=zone):
-                with self.assertRaises(error):
-                    day_bounds_utc(day, zone)
+            with self.subTest(day=day, zone=zone), self.assertRaises(error):
+                day_bounds_utc(day, zone)

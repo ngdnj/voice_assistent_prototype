@@ -8,7 +8,80 @@
 Добавлены прикладной `TaskService`, async-протокол `TaskRepository` и
 демонстрационный `InMemoryTaskRepository` и адаптер `RedisTaskRepository`.
 Redis временно используется как основное хранилище задач прототипа.
-Точек запуска API/worker и интеграций с MAX/AI пока нет.
+API/worker/dispatcher пока не реализованы. Локальный backend запускается через
+`python -m app`; адаптеры LLM/ASR разрабатываются отдельно и здесь не запускаются.
+
+## Быстрый локальный запуск backend
+
+Нужны Python 3.12, `uv` и Docker Compose. Из корня репозитория:
+
+```bash
+cp .env.example .env  # только при первом запуске, не заменяйте свою .env
+uv sync --locked
+docker compose up -d --wait redis
+uv run --locked --env-file .env python -m app check
+uv run --locked --env-file .env python -m app example --operation-id 31d74683-0692-4a40-8c96-b6add3a3824c
+```
+
+`check` проверяет настройки и PING. `example` создаёт фиксированную демонстрационную
+задачу и читает её обратно через тот же сервис; выводит `task_id`. Повтор команды
+с теми же owner/operation UUID возвращает ту же задачу. Для нового действия
+передайте новый UUID. Пример оставляет задачу в Redis; это не отправка в MAX.
+
+Обязательная настройка примера — непустой `BACKEND_DEMO_OWNER_ID` (в шаблоне
+`local-demo`). Это доверенная **локальная** идентичность, а не аутентификация
+MAX. `check` не требует владельца. Redis имеет локальные значения по умолчанию;
+адрес, порт, DB и положительные конечные таймауты проверяются перед запуском.
+`BACKEND_SHUTDOWN_TIMEOUT` — положительное конечное число секунд, по умолчанию 5.
+Никаких ключей MAX, LLM/ASR для этих команд не требуется. `.env` читает `uv`.
+
+`app/runtime.py` собирает сервисы задач/встреч/напоминаний и Stream-адаптер с
+одним Redis-клиентом. Это точка сборки существующего backend, а не имитация
+пока отсутствующих API, очереди агента или dispatcher. Команды одноразовые,
+завершаются после операции. Демонстратор уведомлений остаётся только в `tests/`:
+
+```bash
+uv run --locked --env-file .env python -m tests.notification_consumer
+```
+
+Во время операции Ctrl+C (`SIGINT`) или `kill -TERM <PID Python>` прекращает
+допуск работы: текущая операция получает до `BACKEND_SHUTDOWN_TIMEOUT` секунд.
+Если успевает завершиться — код 0; иначе отменяется, Redis закрывается, код 130.
+Повторный сигнал не запускает вторую обработку. Сейчас за запуск выполняется
+только одна операция; читателя production-очереди нет. Отмена кооперативная:
+операции должны уважать asyncio cancellation, не блокировать event loop и
+использовать ограниченные I/O-таймауты. Закрытие Redis идёт после завершения/
+отмены операции. Уже сохранённая задача не откатывается при остановке:
+повторяйте исходный operation_id, а не создавайте новый.
+
+Ошибочные настройки возвращают код 2 (`invalid_settings`); недоступный Redis —
+код 1 (`storage_unavailable`). Ошибки не печатают DSN, пароли или сырые исключения.
+JSON-логи содержат события и новый `request_id` на запуск; пример добавляет
+`operation_id`. Названия, тексты и owner_id не логируются. Runtime не выполняет
+ACK за пользователя: незавершённая доставка остаётся pending. Даже при таком
+поведении сбой после внешней отправки до ACK может привести к повторной отправке;
+подробнее — [контракт Stream](docs/notification-stream.md).
+
+Проверки на **выделенном тестовом Redis** (локальный Compose не должен содержать
+нужные данные; тесты удаляют только собственные ключи):
+
+```bash
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked mypy
+uv run --locked mypy app/runtime.py app/__main__.py
+RUN_REDIS_INTEGRATION=1 uv run --locked --env-file .env pytest -q -W error::RuntimeWarning
+```
+
+Без `RUN_REDIS_INTEGRATION=1` Redis-тесты пропускаются. Тесты проверяют Stream
+(публикацию, чтение, ACK, claim), CLI, SIGTERM/SIGINT во время обработки,
+ограничение времени завершения и сохранение pending при отмене.
+`.github/workflows/backend.yml` выполняет эти проверки с отдельным Redis service,
+без production-секретов и обращений к AI. Использованы официальные инструкции
+[uv для GitHub Actions](https://docs.astral.sh/uv/guides/integration/github/) и
+[Redis service](https://docs.github.com/en/actions/tutorials/use-containerized-services/create-redis-service-containers).
+Остановка локального Redis: `docker compose stop redis`. Текущий Compose не
+имеет persistence и тома; сохранность после перезапуска не гарантируется.
 
 Пример создания в памяти (Python 3.12+):
 
@@ -55,7 +128,7 @@ In-memory хранилище предназначено только для те
 сервис и правила модели менять не требуется.
 
 Установка закреплённых зависимостей: `uv sync --locked`.
-Проверки: `uv run --locked python -m unittest discover -s tests -v`.
+Проверки: `uv run --locked pytest -q`.
 Интеграционный тест Redis включается отдельно, остальные тесты не требуют сервера.
 
 ## Локальный Redis
@@ -79,7 +152,8 @@ Compose запускает Redis 7.4.2 только на `127.0.0.1`, без п�
 подключение и сетевые операции команд. Автоматические повторы команд отключены.
 Не логируйте настройки подключения, пароль и исключения с чувствительными данными.
 
-Жизненный цикл будущего процесса (один клиент и его pool на всё время работы):
+Жизненный цикл процесса (один клиент и его pool на всё время работы,
+точка сборки — `app/runtime.py`):
 
 ```python
 from app.storage.redis import RedisSettings, check_redis, redis_connection
@@ -100,7 +174,7 @@ async def run_process():
 Интеграционный прогон на **отдельном тестовом Redis** (например, локальном Compose):
 
 ```bash
-RUN_REDIS_INTEGRATION=1 uv run --locked --env-file .env python -m unittest discover -s tests -v
+RUN_REDIS_INTEGRATION=1 uv run --locked --env-file .env pytest -q
 ```
 
 Тест использует уникальный ключ `it-gorky:test:redis:<UUID>:roundtrip`,
