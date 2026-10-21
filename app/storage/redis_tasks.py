@@ -7,12 +7,18 @@ from uuid import UUID
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
+from app.planner.operation import CreationOperation
 from app.planner.query import QueryTooBroadError, RecordQuery
 from app.planner.repository import TaskAlreadyExistsError, TaskStorageError
 from app.planner.task import Task
 from app.storage.redis_index import (
-    ADD_INDEXED, INDEX_EXISTING, index_key, index_member, read_index,
+    ADD_INDEXED,
+    INDEX_EXISTING,
+    index_key,
+    index_member,
+    read_index,
 )
+from app.storage.redis_operation import commit_operation, operation_key, read_operation
 
 
 class RedisTaskRepository:
@@ -25,24 +31,46 @@ class RedisTaskRepository:
     def _key(self, task_id: UUID) -> str:
         return f"{self._key_prefix}:v1:task:{task_id}"
 
-    async def add(self, task: Task) -> None:
-        payload = json.dumps({
-            "id": str(task.id),
-            "owner_id": task.owner_id,
-            "title": task.title,
-            "status": task.status,
-            "created_at": task.created_at.isoformat(),
-        }, ensure_ascii=False)
+    async def add(self, task: Task, *, operation: CreationOperation | None = None) -> Task:
+        payload = json.dumps(
+            {
+                "id": str(task.id),
+                "owner_id": task.owner_id,
+                "title": task.title,
+                "status": task.status,
+                "created_at": task.created_at.isoformat(),
+            },
+            ensure_ascii=False,
+        )
         try:
+            if operation is not None:
+                saved = await commit_operation(
+                    self._client,
+                    record_key=self._key(task.id),
+                    index_key=index_key(self._key_prefix, "task", task.owner_id),
+                    operation_key=operation_key(
+                        self._key_prefix, "task", task.owner_id, operation.operation_id
+                    ),
+                    operation=operation,
+                    payload=payload,
+                    member=index_member(task.created_at, task.id),
+                )
+                if saved is None:
+                    raise TaskAlreadyExistsError("Task ID already exists")
+                return await self._operation_result(saved, task.owner_id)
             added = await self._client.eval(
-                ADD_INDEXED, 2, self._key(task.id),
+                ADD_INDEXED,
+                2,
+                self._key(task.id),
                 index_key(self._key_prefix, "task", task.owner_id),
-                payload, index_member(task.created_at, task.id),
+                payload,
+                index_member(task.created_at, task.id),
             )
         except RedisError:
             raise TaskStorageError("Task storage write failed") from None
         if not added:
             raise TaskAlreadyExistsError("Task ID already exists")
+        return task
 
     async def get(self, *, task_id: UUID, owner_id: str) -> Task | None:
         try:
@@ -58,9 +86,7 @@ class RedisTaskRepository:
     def _decode(payload: str | bytes, task_id: UUID) -> Task:
         try:
             data = json.loads(payload)
-            if not isinstance(data, dict) or set(data) != {
-                "id", "owner_id", "title", "status", "created_at"
-            }:
+            if not isinstance(data, dict) or set(data) != {"id", "owner_id", "title", "status", "created_at"}:
                 raise ValueError("Invalid fields")
             if not all(isinstance(value, str) for value in data.values()):
                 raise ValueError("Invalid field types")
@@ -71,8 +97,10 @@ class RedisTaskRepository:
             if created_at.utcoffset() != timedelta(0):
                 raise ValueError("Expected UTC timestamp")
             task = Task(
-                id=stored_id, owner_id=data["owner_id"],
-                title=data["title"], created_at=created_at,
+                id=stored_id,
+                owner_id=data["owner_id"],
+                title=data["title"],
+                created_at=created_at,
             )
             if task.title != data["title"]:
                 raise ValueError("Expected normalized title")
@@ -94,14 +122,16 @@ class RedisTaskRepository:
                 if payload is None:
                     raise ValueError("Index points to a missing record")
                 record = self._decode(payload, record_id)
-                if (record.owner_id != query.owner_id
-                        or index_member(record.created_at, record.id) != member
-                        or not query.includes(record.created_at)):
+                if (
+                    record.owner_id != query.owner_id
+                    or index_member(record.created_at, record.id) != member
+                    or not query.includes(record.created_at)
+                ):
                     raise ValueError("Index does not match stored record")
                 if query.query is None or query.query in record.title.casefold():
                     records.append(record)
             if query.query is not None:
-                return records[query.offset:query.offset + query.limit]
+                return records[query.offset : query.offset + query.limit]
             return records
         except QueryTooBroadError:
             raise
@@ -119,11 +149,40 @@ class RedisTaskRepository:
                     continue
                 record = self._decode(payload, record_id)
                 await self._client.eval(
-                    INDEX_EXISTING, 2, key,
+                    INDEX_EXISTING,
+                    2,
+                    key,
                     index_key(self._key_prefix, "task", record.owner_id),
-                    payload, index_member(record.created_at, record.id),
+                    payload,
+                    index_member(record.created_at, record.id),
                 )
                 count += 1
             return count
         except (RedisError, UnicodeError, ValueError):
             raise TaskStorageError("Task index backfill failed") from None
+
+    async def get_created(self, *, owner_id: str, operation: CreationOperation) -> Task | None:
+        try:
+            saved = await read_operation(
+                self._client,
+                operation_key(self._key_prefix, "task", owner_id, operation.operation_id),
+                operation,
+            )
+            return None if saved is None else await self._operation_result(saved, owner_id)
+        except (RedisError, UnicodeError):
+            raise TaskStorageError("Task operation read failed") from None
+
+    async def _operation_result(self, payload: str, owner_id: str) -> Task:
+        try:
+            record = self._decode(payload, UUID(json.loads(payload)["id"]))
+            if record.owner_id != owner_id:
+                raise ValueError("Operation owner mismatch")
+            actual = await self._client.get(self._key(record.id))
+            score = await self._client.zscore(
+                index_key(self._key_prefix, "task", owner_id), index_member(record.created_at, record.id)
+            )
+            if actual != payload or score != 0:
+                raise ValueError("Operation result is inconsistent with record/index")
+            return record
+        except (RedisError, UnicodeError, ValueError, TypeError, KeyError):
+            raise TaskStorageError("Task operation result is invalid") from None

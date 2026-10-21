@@ -34,21 +34,24 @@ from datetime import UTC, datetime
 from app.planner.service import TaskService
 from app.storage.memory import InMemoryTaskRepository
 
+
 async def main():
     service = TaskService(
         repository=InMemoryTaskRepository(),
         clock=lambda: datetime(2026, 10, 21, 9, 30, tzinfo=UTC),
     )
-    task = await service.create_task(owner_id="user-42", title="Подготовить отчёт")
+    task = await service.create_task(owner_id="user-42", title="Подготовить отчёт", operation_id="example-1")
     assert await service.get_task(task_id=task.id, owner_id="user-42") == task
     assert await service.get_task(task_id=task.id, owner_id="other-user") is None
+
 
 asyncio.run(main())
 ```
 
 In-memory хранилище предназначено только для тестов и локальных примеров:
 данные привязаны к экземпляру и не сохраняются после перезапуска.
-Для смены хранилища передайте реализацию двух async-методов `add` и `get`;
+Для смены хранилища реализуйте async-контракт `TaskRepository`:
+`add`, `get`, `list` и `get_created`;
 сервис и правила модели менять не требуется.
 
 Установка закреплённых зависимостей: `uv sync --locked`.
@@ -80,6 +83,7 @@ Compose запускает Redis 7.4.2 только на `127.0.0.1`, без п�
 
 ```python
 from app.storage.redis import RedisSettings, check_redis, redis_connection
+
 
 async def run_process():
     async with redis_connection(RedisSettings.from_env()) as redis:
@@ -116,13 +120,14 @@ from app.planner.service import TaskService
 from app.storage.redis import RedisSettings, redis_connection
 from app.storage.redis_tasks import RedisTaskRepository
 
+
 async def task_example():
     async with redis_connection(RedisSettings.from_env()) as client:
         service = TaskService(
             repository=RedisTaskRepository(client),
             clock=lambda: datetime(2026, 10, 21, 9, 30, tzinfo=UTC),
         )
-        task = await service.create_task(owner_id="user-42", title="Отчёт")
+        task = await service.create_task(owner_id="user-42", title="Отчёт", operation_id="example-2")
         assert await service.get_task(task_id=task.id, owner_id="user-42") == task
         assert await service.get_task(task_id=task.id, owner_id="other") is None
 ```
@@ -136,8 +141,8 @@ async def task_example():
 
 Запись выполняется атомарным Lua-вызовом `SET NX` и обновления индекса, **без TTL**.
 Существующий UUID нельзя перезаписать, даже при другом владельце:
-выдаётся `TaskAlreadyExistsError`. Это защита от перезаписи по UUID,
-не идемпотентность по `action_id`: повтор `service.create_task` создаёт новую задачу.
+выдаётся `TaskAlreadyExistsError`. Прямой add без метаданных защищает только UUID. Сервис требует `operation_id`
+и атомарно сохраняет также результат идемпотентности; повтор возвращает исходную задачу.
 Повреждённый JSON, неверные поля/UUID/статус/UTC-время и неверный Redis-тип
 дают `TaskStorageError`, а не отсутствие записи. Ошибки Redis также преобразуются
 в `TaskStorageError` без включения исходных данных в сообщение.
@@ -169,15 +174,18 @@ from datetime import UTC, datetime
 from app.planner.meeting_service import MeetingService
 from app.storage.redis_meetings import RedisMeetingRepository
 
+
 async def meeting_example(client):
     service = MeetingService(
         repository=RedisMeetingRepository(client),
         clock=lambda: datetime(2026, 10, 22, 8, tzinfo=UTC),
     )
     meeting = await service.create_meeting(
-        owner_id="user-42", title="Обсуждение проекта",
+        owner_id="user-42",
+        title="Обсуждение проекта",
         starts_at=datetime(2026, 10, 22, 9, tzinfo=UTC),
         ends_at=datetime(2026, 10, 22, 9, 45, tzinfo=UTC),
+        operation_id="example-3",
     )
     assert await service.get_meeting(meeting_id=meeting.id, owner_id="user-42") == meeting
 ```
@@ -189,7 +197,7 @@ UUID и UTC-моменты сериализуются строками без п
 или повреждённые данные — `MeetingStorageError`. Чужая и отсутствующая встреча
 возвращают `None`. Восстановление не генерирует новый UUID или время создания.
 Ограничения persistence и резервного копирования выше относятся и к встречам.
-Идемпотентность по action_id, участники, приглашения, интеграции календарей,
+Участники, приглашения, интеграции календарей,
 обнаружение конфликтов не реализовано.
 
 Проверки правил и сервиса: `tests/test_meeting.py`; интеграционные проверки:
@@ -221,14 +229,17 @@ from datetime import UTC, datetime
 from app.planner.reminder_service import ReminderService
 from app.storage.redis_reminders import RedisReminderRepository
 
+
 async def reminder_example(client):
     service = ReminderService(
         repository=RedisReminderRepository(client),
         clock=lambda: datetime(2026, 10, 22, 8, tzinfo=UTC),
     )
     reminder = await service.create_reminder(
-        owner_id="user-42", text="Позвонить Ивану",
+        owner_id="user-42",
+        text="Позвонить Ивану",
         remind_at=datetime(2026, 10, 22, 9, tzinfo=UTC),
+        operation_id="example-4",
     )
     assert await service.get_reminder(reminder_id=reminder.id, owner_id="user-42") == reminder
 ```
@@ -237,9 +248,20 @@ async def reminder_example(client):
 Чужая/отсутствующая запись возвращает `None`, конфликт UUID —
 `ReminderAlreadyExistsError`, сбой Redis/повреждение — `ReminderStorageError`.
 Ограничения persistence и резервного копирования выше действуют и здесь.
-Планировщик, отправка MAX, повторяющиеся напоминания и идемпотентность по action_id
-не реализованы. Проверки — `tests/test_reminder.py` и `tests/test_redis_reminders.py`;
+Планировщик, отправка MAX и повторяющиеся напоминания не реализованы. Проверки — `tests/test_reminder.py` и `tests/test_redis_reminders.py`;
 интеграционные включаются общим `RUN_REDIS_INTEGRATION=1`.
+
+## Идемпотентность создания
+
+Сервисы создания задач, встреч и напоминаний требуют `operation_id` от адаптера.
+Область уникальности: владелец + тип операции + operation_id. Те же
+нормализованные данные возвращают первоначальные UUID и created_at,
+другие — `OperationConflictError`. Запись, индекс и JSON результата сохраняются
+одним Lua-вызовом Redis. TTL у истории операций нет: автоматическое истечение
+снова разрешило бы создать дубль. Удаление/потеря истории снимает эту защиту;
+она не заменяет persistence и backup.
+Контракт, формат ключей и **построчный разбор 17 строк Lua**:
+[docs/idempotency.md](docs/idempotency.md).
 
 ## Структура
 

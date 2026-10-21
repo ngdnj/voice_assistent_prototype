@@ -3,8 +3,9 @@
 from typing import Protocol
 from uuid import UUID
 
-from app.planner.query import RecordQuery
 from app.planner.meeting import Meeting
+from app.planner.operation import CreationOperation
+from app.planner.query import RecordQuery
 
 
 class MeetingStorageError(Exception):
@@ -16,7 +17,7 @@ class MeetingAlreadyExistsError(MeetingStorageError):
 
 
 class MeetingRepository(Protocol):
-    async def add(self, meeting: Meeting) -> None:
+    async def add(self, meeting: Meeting, *, operation: CreationOperation | None = None) -> Meeting:
         """Store a meeting before returning successfully."""
         ...
 
@@ -26,4 +27,8 @@ class MeetingRepository(Protocol):
 
     async def list(self, query: RecordQuery) -> list[Meeting]:
         """List or search accessible records in stable time/ID order."""
+        ...
+
+    async def get_created(self, *, owner_id: str, operation: CreationOperation) -> Meeting | None:
+        """Replay a matching creation or raise OperationConflictError."""
         ...

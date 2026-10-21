@@ -14,13 +14,11 @@ CREATED_AT = datetime(2026, 10, 21, 9, 30, tzinfo=UTC)
 class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.repository = InMemoryTaskRepository()
-        self.service = TaskService(
-            repository=self.repository, clock=lambda: CREATED_AT
-        )
+        self.service = TaskService(repository=self.repository, clock=lambda: CREATED_AT)
 
     async def test_create_and_get_task(self) -> None:
         task = await self.service.create_task(
-            owner_id="user-42", title="  Подготовить отчёт  "
+            owner_id="user-42", title="  Подготовить отчёт  ", operation_id="test-call-1"
         )
         fetched = await self.service.get_task(task_id=task.id, owner_id="user-42")
         self.assertEqual(fetched, task)
@@ -29,63 +27,63 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(task.created_at, CREATED_AT)
 
     async def test_unknown_task_returns_none(self) -> None:
-        self.assertIsNone(
-            await self.service.get_task(task_id=uuid4(), owner_id="user-42")
-        )
+        self.assertIsNone(await self.service.get_task(task_id=uuid4(), owner_id="user-42"))
 
     async def test_other_owners_task_returns_none(self) -> None:
-        task = await self.service.create_task(owner_id="user-42", title="Отчёт")
-        self.assertIsNone(
-            await self.service.get_task(task_id=task.id, owner_id="other-user")
-        )
-        self.assertEqual(
-            await self.service.get_task(task_id=task.id, owner_id="user-42"), task
-        )
+        task = await self.service.create_task(owner_id="user-42", title="Отчёт", operation_id="test-call-2")
+        self.assertIsNone(await self.service.get_task(task_id=task.id, owner_id="other-user"))
+        self.assertEqual(await self.service.get_task(task_id=task.id, owner_id="user-42"), task)
 
     async def test_repository_errors_propagate(self) -> None:
         for method in ("add", "get"):
             with self.subTest(method=method):
                 repository = AsyncMock(spec=TaskRepository)
+                repository.get_created.return_value = None
+                repository.add.side_effect = lambda record, **kwargs: record
                 error = ConnectionError("storage unavailable")
                 getattr(repository, method).side_effect = error
                 service = TaskService(repository=repository, clock=lambda: CREATED_AT)
                 with self.assertRaises(ConnectionError) as caught:
                     if method == "add":
-                        await service.create_task(owner_id="user-42", title="Отчёт")
+                        await service.create_task(
+                            owner_id="user-42", title="Отчёт", operation_id="test-call-8"
+                        )
                     else:
                         await service.get_task(task_id=uuid4(), owner_id="user-42")
                 self.assertIs(caught.exception, error)
 
     async def test_invalid_task_is_not_added(self) -> None:
         repository = AsyncMock(spec=TaskRepository)
+        repository.get_created.return_value = None
+        repository.add.side_effect = lambda record, **kwargs: record
         service = TaskService(repository=repository, clock=lambda: CREATED_AT)
         with self.assertRaises(ValueError):
-            await service.create_task(owner_id="user-42", title=" ")
+            await service.create_task(owner_id="user-42", title=" ", operation_id="test-call-7")
         repository.add.assert_not_awaited()
 
     async def test_service_works_with_another_repository(self) -> None:
         repository = AsyncMock(spec=TaskRepository)
+        repository.get_created.return_value = None
+        repository.add.side_effect = lambda record, **kwargs: record
         service = TaskService(repository=repository, clock=lambda: CREATED_AT)
-        task = await service.create_task(owner_id="user-42", title="Отчёт")
-        repository.add.assert_awaited_once_with(task)
-        repository.get.return_value = task
-        self.assertEqual(
-            await service.get_task(task_id=task.id, owner_id="user-42"), task
+        task = await service.create_task(owner_id="user-42", title="Отчёт", operation_id="test-call-3")
+        repository.add.assert_awaited_once_with(
+            task, operation=repository.get_created.await_args.kwargs["operation"]
         )
+        repository.get.return_value = task
+        self.assertEqual(await service.get_task(task_id=task.id, owner_id="user-42"), task)
         repository.get.assert_awaited_once_with(task_id=task.id, owner_id="user-42")
 
     async def test_clock_is_called_for_each_creation(self) -> None:
         later = datetime(2026, 10, 21, 10, 30, tzinfo=UTC)
         moments = iter((CREATED_AT, later))
         service = TaskService(repository=self.repository, clock=lambda: next(moments))
-        first = await service.create_task(owner_id="user-42", title="Первое")
-        second = await service.create_task(owner_id="user-42", title="Второе")
+        first = await service.create_task(owner_id="user-42", title="Первое", operation_id="test-call-4")
+        second = await service.create_task(owner_id="user-42", title="Второе", operation_id="test-call-5")
         self.assertEqual(first.created_at, CREATED_AT)
         self.assertEqual(second.created_at, later)
 
     async def test_memory_repositories_are_isolated(self) -> None:
-        task = await self.service.create_task(owner_id="user-42", title="Отчёт")
-        other = TaskService(
-            repository=InMemoryTaskRepository(), clock=lambda: CREATED_AT
-        )
+        task = await self.service.create_task(owner_id="user-42", title="Отчёт", operation_id="test-call-6")
+        other = TaskService(repository=InMemoryTaskRepository(), clock=lambda: CREATED_AT)
         self.assertIsNone(await other.get_task(task_id=task.id, owner_id="user-42"))

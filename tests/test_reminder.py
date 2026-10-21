@@ -10,15 +10,13 @@ from app.planner.reminder_repository import ReminderRepository
 from app.planner.reminder_service import ReminderService
 from app.planner.time import AmbiguousLocalTimeError, NonexistentLocalTimeError
 
-
 CREATED = datetime(2026, 10, 22, 8, tzinfo=UTC)
 DUE = CREATED + timedelta(hours=1)
 
 
 class ReminderTests(unittest.TestCase):
     def values(self) -> dict[str, str | datetime]:
-        return dict(owner_id="user-42", text="  Позвонить  Ивану  ",
-                    remind_at=DUE, created_at=CREATED)
+        return dict(owner_id="user-42", text="  Позвонить  Ивану  ", remind_at=DUE, created_at=CREATED)
 
     def test_create_normalize_and_unique_id(self) -> None:
         reminder = create_reminder(**self.values())
@@ -28,20 +26,18 @@ class ReminderTests(unittest.TestCase):
         self.assertEqual(reminder.text, "Позвонить  Ивану")
         self.assertEqual((reminder.remind_at, reminder.created_at), (DUE, CREATED))
         with self.assertRaises(FrozenInstanceError):
-            setattr(reminder, "text", "")
+            reminder.text = ""
 
     def test_empty_fields(self) -> None:
         for name in ("owner_id", "text"):
             for value in ("", " \t\n"):
-                with self.subTest(name=name, value=value):
-                    with self.assertRaisesRegex(ValueError, name):
-                        create_reminder(**{**self.values(), name: value})
+                with self.subTest(name=name, value=value), self.assertRaisesRegex(ValueError, name):
+                    create_reminder(**{**self.values(), name: value})
 
     def test_naive_time(self) -> None:
         for name in ("remind_at", "created_at"):
-            with self.subTest(name=name):
-                with self.assertRaisesRegex(ValueError, "timezone-aware"):
-                    create_reminder(**{**self.values(), name: DUE.replace(tzinfo=None)})
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "timezone-aware"):
+                create_reminder(**{**self.values(), name: DUE.replace(tzinfo=None)})
 
     def test_past_rejected_and_equal_allowed(self) -> None:
         with self.assertRaises(PastReminderTimeError):
@@ -51,10 +47,13 @@ class ReminderTests(unittest.TestCase):
 
     def test_compare_exact_instants_and_normalize(self) -> None:
         offset = timezone(timedelta(hours=3))
-        reminder = create_reminder(**{
-            **self.values(), "remind_at": DUE.astimezone(offset),
-            "created_at": CREATED.astimezone(offset),
-        })
+        reminder = create_reminder(
+            **{
+                **self.values(),
+                "remind_at": DUE.astimezone(offset),
+                "created_at": CREATED.astimezone(offset),
+            }
+        )
         self.assertEqual(reminder.remind_at, DUE)
         self.assertIs(reminder.remind_at.tzinfo, UTC)
         self.assertIs(reminder.created_at.tzinfo, UTC)
@@ -65,25 +64,28 @@ class ReminderTests(unittest.TestCase):
             (datetime(2026, 10, 25, 2, 30), AmbiguousLocalTimeError),
         ):
             for name in ("remind_at", "created_at"):
-                with self.subTest(name=name, wall=wall):
-                    with self.assertRaises(error):
-                        create_reminder(**{
-                            **self.values(), name: wall.replace(tzinfo=ZoneInfo("Europe/Berlin"))
-                        })
+                with self.subTest(name=name, wall=wall), self.assertRaises(error):
+                    create_reminder(**{**self.values(), name: wall.replace(tzinfo=ZoneInfo("Europe/Berlin"))})
 
     def test_reminder_contains_no_delivery_state(self) -> None:
-        self.assertEqual({f.name for f in fields(Reminder)}, {
-            "id", "owner_id", "text", "remind_at", "created_at"
-        })
+        self.assertEqual(
+            {f.name for f in fields(Reminder)}, {"id", "owner_id", "text", "remind_at", "created_at"}
+        )
 
 
 class ReminderServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_creation_and_retrieval_after_due_time(self) -> None:
         repository = AsyncMock(spec=ReminderRepository)
+        repository.get_created.return_value = None
+        repository.add.side_effect = lambda record, **kwargs: record
         clock = Mock(return_value=CREATED)
         service = ReminderService(repository=repository, clock=clock)
-        reminder = await service.create_reminder(owner_id="user-42", text="Позвонить", remind_at=DUE)
-        repository.add.assert_awaited_once_with(reminder)
+        reminder = await service.create_reminder(
+            owner_id="user-42", text="Позвонить", remind_at=DUE, operation_id="test-call-1"
+        )
+        repository.add.assert_awaited_once_with(
+            reminder, operation=repository.get_created.await_args.kwargs["operation"]
+        )
         clock.assert_called_once_with()
         repository.get.return_value = reminder
         clock.return_value = DUE + timedelta(days=1)
@@ -95,21 +97,32 @@ class ReminderServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_past_not_saved(self) -> None:
         repository = AsyncMock(spec=ReminderRepository)
+        repository.get_created.return_value = None
+        repository.add.side_effect = lambda record, **kwargs: record
         service = ReminderService(repository=repository, clock=lambda: CREATED)
         with self.assertRaises(PastReminderTimeError):
-            await service.create_reminder(owner_id="user-42", text="Позвонить", remind_at=CREATED - timedelta(seconds=1))
+            await service.create_reminder(
+                owner_id="user-42",
+                text="Позвонить",
+                remind_at=CREATED - timedelta(seconds=1),
+                operation_id="test-call-2",
+            )
         repository.add.assert_not_awaited()
 
     async def test_errors_propagate(self) -> None:
         for method in ("add", "get"):
             with self.subTest(method=method):
                 repository = AsyncMock(spec=ReminderRepository)
+                repository.get_created.return_value = None
+                repository.add.side_effect = lambda record, **kwargs: record
                 error = ConnectionError("storage unavailable")
                 getattr(repository, method).side_effect = error
                 service = ReminderService(repository=repository, clock=lambda: CREATED)
                 with self.assertRaises(ConnectionError) as caught:
                     if method == "add":
-                        await service.create_reminder(owner_id="user-42", text="Позвонить", remind_at=DUE)
+                        await service.create_reminder(
+                            owner_id="user-42", text="Позвонить", remind_at=DUE, operation_id="test-call-3"
+                        )
                     else:
                         await service.get_reminder(reminder_id=uuid4(), owner_id="user-42")
                 self.assertIs(caught.exception, error)

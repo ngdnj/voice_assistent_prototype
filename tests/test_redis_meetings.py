@@ -18,7 +18,6 @@ from app.storage.redis_index import index_key
 from app.storage.redis_meetings import RedisMeetingRepository
 from app.storage.redis_tasks import RedisTaskRepository
 
-
 CREATED = datetime(2026, 10, 22, 8, 0, 0, 123456, tzinfo=UTC)
 START = CREATED + timedelta(hours=1)
 END = START + timedelta(minutes=45)
@@ -33,10 +32,15 @@ class RedisMeetingErrorTests(unittest.IsolatedAsyncioTestCase):
                 repository = RedisMeetingRepository(client)
                 with self.assertRaises(MeetingStorageError) as caught:
                     if method == "eval":
-                        await repository.add(create_meeting(
-                            owner_id="user-42", title="Обсуждение", starts_at=START,
-                            ends_at=END, created_at=CREATED,
-                        ))
+                        await repository.add(
+                            create_meeting(
+                                owner_id="user-42",
+                                title="Обсуждение",
+                                starts_at=START,
+                                ends_at=END,
+                                created_at=CREATED,
+                            )
+                        )
                     else:
                         await repository.get(meeting_id=uuid4(), owner_id="user-42")
                 self.assertNotIn("private data", str(caught.exception))
@@ -56,14 +60,21 @@ class RedisMeetingIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self.cleanup_keys)
         self.repository = RedisMeetingRepository(self.client, key_prefix=self.prefix)
         self.meeting = create_meeting(
-            owner_id="user-42", title="Обсуждение 📋", starts_at=START,
-            ends_at=END, created_at=CREATED,
+            owner_id="user-42",
+            title="Обсуждение 📋",
+            starts_at=START,
+            ends_at=END,
+            created_at=CREATED,
         )
 
     async def cleanup_keys(self) -> None:
-        self.keys.extend(index_key(self.prefix, kind, owner)
-                         for kind in ("task", "meeting", "reminder")
-                         for owner in ("user-42", "other"))
+        async for key in self.client.scan_iter(match=f"{self.prefix}:v1:operation:*"):
+            await self.client.delete(key)
+        self.keys.extend(
+            index_key(self.prefix, kind, owner)
+            for kind in ("task", "meeting", "reminder")
+            for owner in ("user-42", "other")
+        )
         if self.keys:
             await self.client.delete(*self.keys)
 
@@ -75,7 +86,11 @@ class RedisMeetingIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_service_roundtrip_with_new_client_and_repository(self) -> None:
         service = MeetingService(repository=self.repository, clock=lambda: CREATED)
         meeting = await service.create_meeting(
-            owner_id="user-42", title="Обсуждение 📋", starts_at=START, ends_at=END
+            owner_id="user-42",
+            title="Обсуждение 📋",
+            starts_at=START,
+            ends_at=END,
+            operation_id="test-call-1",
         )
         key = self.key_for(meeting.id)
         async with redis_connection(RedisSettings.from_env()) as client:
@@ -86,27 +101,36 @@ class RedisMeetingIntegrationTests(unittest.IsolatedAsyncioTestCase):
             loaded = await service.get_meeting(meeting_id=meeting.id, owner_id="user-42")
         self.assertEqual(loaded, meeting)
         self.assertEqual(await self.client.ttl(key), -1)
-        self.assertEqual(json.loads(await self.client.get(key)), {
-            "id": str(meeting.id), "owner_id": "user-42", "title": "Обсуждение 📋",
-            "starts_at": START.isoformat(), "ends_at": END.isoformat(),
-            "created_at": CREATED.isoformat(),
-        })
+        self.assertEqual(
+            json.loads(await self.client.get(key)),
+            {
+                "id": str(meeting.id),
+                "owner_id": "user-42",
+                "title": "Обсуждение 📋",
+                "starts_at": START.isoformat(),
+                "ends_at": END.isoformat(),
+                "created_at": CREATED.isoformat(),
+            },
+        )
 
     async def test_missing_and_foreign_meetings(self) -> None:
         self.assertIsNone(await self.repository.get(meeting_id=uuid4(), owner_id="user-42"))
         self.key_for(self.meeting.id)
         await self.repository.add(self.meeting)
         self.assertIsNone(await self.repository.get(meeting_id=self.meeting.id, owner_id="other"))
-        self.assertEqual(await self.repository.get(meeting_id=self.meeting.id, owner_id="user-42"), self.meeting)
+        self.assertEqual(
+            await self.repository.get(meeting_id=self.meeting.id, owner_id="user-42"), self.meeting
+        )
 
     async def test_no_overwrite_and_concurrent_add(self) -> None:
         self.key_for(self.meeting.id)
         other = replace(self.meeting, title="Другая встреча")
         results = await asyncio.gather(
-            self.repository.add(self.meeting), self.repository.add(other),
+            self.repository.add(self.meeting),
+            self.repository.add(other),
             return_exceptions=True,
         )
-        self.assertEqual(results.count(None), 1)
+        self.assertEqual(sum(not isinstance(r, BaseException) for r in results), 1)
         self.assertEqual(sum(isinstance(r, MeetingAlreadyExistsError) for r in results), 1)
         stored = await self.repository.get(meeting_id=self.meeting.id, owner_id="user-42")
         with self.assertRaises(MeetingAlreadyExistsError):
@@ -129,9 +153,14 @@ class RedisMeetingIntegrationTests(unittest.IsolatedAsyncioTestCase):
         good = json.loads(await self.client.get(key))
         payloads = ["broken", "[]", "{}", b"\xff"]
         for field, value in (
-            ("id", "invalid"), ("id", str(uuid4())), ("owner_id", " "),
-            ("title", " "), ("title", 42), ("title", " not normalized "),
-            ("starts_at", END.isoformat()), ("ends_at", START.isoformat()),
+            ("id", "invalid"),
+            ("id", str(uuid4())),
+            ("owner_id", " "),
+            ("title", " "),
+            ("title", 42),
+            ("title", " not normalized "),
+            ("starts_at", END.isoformat()),
+            ("ends_at", START.isoformat()),
         ):
             payloads.append(json.dumps({**good, field: value}))
         for field in ("starts_at", "ends_at", "created_at"):

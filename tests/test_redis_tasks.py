@@ -51,9 +51,13 @@ class RedisTaskIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.repository = RedisTaskRepository(self.client, key_prefix=self.prefix)
 
     async def cleanup_keys(self) -> None:
-        self.keys.extend(index_key(self.prefix, kind, owner)
-                         for kind in ("task", "meeting", "reminder")
-                         for owner in ("user-42", "other"))
+        async for key in self.client.scan_iter(match=f"{self.prefix}:v1:operation:*"):
+            await self.client.delete(key)
+        self.keys.extend(
+            index_key(self.prefix, kind, owner)
+            for kind in ("task", "meeting", "reminder")
+            for owner in ("user-42", "other")
+        )
         if self.keys:
             await self.client.delete(*self.keys)
 
@@ -64,7 +68,7 @@ class RedisTaskIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_service_roundtrip_through_new_repository(self) -> None:
         service = TaskService(repository=self.repository, clock=lambda: CREATED_AT)
-        task = await service.create_task(owner_id="user-42", title="Отчёт 📋")
+        task = await service.create_task(owner_id="user-42", title="Отчёт 📋", operation_id="test-call-1")
         key = self.key_for(task.id)
         # A new client and repository cannot rely on the first instance's memory.
         async with redis_connection(RedisSettings.from_env()) as client:
@@ -77,10 +81,16 @@ class RedisTaskIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(loaded.created_at.microsecond, 123456)
         self.assertIs(loaded.created_at.tzinfo, UTC)
         self.assertEqual(await self.client.ttl(key), -1)
-        self.assertEqual(json.loads(await self.client.get(key)), {
-            "id": str(task.id), "owner_id": "user-42", "title": "Отчёт 📋",
-            "status": "active", "created_at": CREATED_AT.isoformat(),
-        })
+        self.assertEqual(
+            json.loads(await self.client.get(key)),
+            {
+                "id": str(task.id),
+                "owner_id": "user-42",
+                "title": "Отчёт 📋",
+                "status": "active",
+                "created_at": CREATED_AT.isoformat(),
+            },
+        )
 
     async def test_absent_task(self) -> None:
         self.assertIsNone(await self.repository.get(task_id=uuid4(), owner_id="user-42"))
@@ -108,7 +118,7 @@ class RedisTaskIntegrationTests(unittest.IsolatedAsyncioTestCase):
         results = await asyncio.gather(
             self.repository.add(task), self.repository.add(other), return_exceptions=True
         )
-        self.assertEqual(results.count(None), 1)
+        self.assertEqual(sum(not isinstance(r, BaseException) for r in results), 1)
         self.assertEqual(sum(isinstance(r, TaskAlreadyExistsError) for r in results), 1)
         stored = await self.repository.get(task_id=task.id, owner_id=task.owner_id)
         self.assertIn(stored, (task, other))
@@ -117,14 +127,22 @@ class RedisTaskIntegrationTests(unittest.IsolatedAsyncioTestCase):
         task = create_task(owner_id="user-42", title="Отчёт", created_at=CREATED_AT)
         key = self.key_for(task.id)
         good = {
-            "id": str(task.id), "owner_id": task.owner_id, "title": task.title,
-            "status": "active", "created_at": CREATED_AT.isoformat(),
+            "id": str(task.id),
+            "owner_id": task.owner_id,
+            "title": task.title,
+            "status": "active",
+            "created_at": CREATED_AT.isoformat(),
         }
         bad_records = ["not JSON", "[]", "{}", b"\xff"]
         for field, value in (
-            ("id", "invalid"), ("id", str(uuid4())), ("owner_id", " "),
-            ("title", " "), ("title", " untrimmed "), ("title", 123),
-            ("status", "done"), ("created_at", "2026-10-21T09:30:00"),
+            ("id", "invalid"),
+            ("id", str(uuid4())),
+            ("owner_id", " "),
+            ("title", " "),
+            ("title", " untrimmed "),
+            ("title", 123),
+            ("status", "done"),
+            ("created_at", "2026-10-21T09:30:00"),
             ("created_at", "2026-10-21T09:30:00+03:00"),
         ):
             bad_records.append(json.dumps({**good, field: value}))
