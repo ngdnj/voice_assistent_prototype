@@ -1,0 +1,5 @@
+[project]
+name = "it-gorky-assistant"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["redis>=8.1,<9"]
