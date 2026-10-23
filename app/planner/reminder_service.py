@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import datetime
 from uuid import UUID
 
+from app.planner.fields import description_fingerprint_data
 from app.planner.operation import CreationOperation
 from app.planner.query import RecordQuery
 from app.planner.reminder import Reminder, create_reminder
@@ -17,17 +18,19 @@ class ReminderService:
         self._clock = clock
 
     async def create_reminder(
-        self, *, owner_id: str, text: str, remind_at: datetime, operation_id: str
+        self, *, owner_id: str, text: str, remind_at: datetime, operation_id: str, description: str = ""
     ) -> Reminder:
         remind_at = to_utc(remind_at)
         operation = CreationOperation.from_data(
-            operation_id, text=text.strip(), remind_at=remind_at.isoformat()
+            operation_id, text=text.strip(), remind_at=remind_at.isoformat(),
+            **description_fingerprint_data(description),
         )
         previous = await self._repository.get_created(owner_id=owner_id, operation=operation)
         if previous is not None:
             return previous
         reminder = create_reminder(
-            owner_id=owner_id, text=text, remind_at=remind_at, created_at=self._clock()
+            owner_id=owner_id, text=text, remind_at=remind_at, created_at=self._clock(),
+            description=description,
         )
         return await self._repository.add(reminder, operation=operation)
 

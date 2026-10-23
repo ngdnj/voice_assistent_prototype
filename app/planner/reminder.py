@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID, uuid4
 
+from app.planner.fields import check_name_length, normalize_description
 from app.planner.time import to_utc
 
 
@@ -17,6 +18,7 @@ class Reminder:
     text: str
     remind_at: datetime
     created_at: datetime
+    description: str = ""
     id: UUID = field(default_factory=uuid4)
 
     def __post_init__(self) -> None:
@@ -29,13 +31,16 @@ class Reminder:
         if remind_at < created_at:
             raise PastReminderTimeError("remind_at must not precede created_at")
         object.__setattr__(self, "text", text)
+        object.__setattr__(self, "description", normalize_description(self.description))
         object.__setattr__(self, "remind_at", remind_at)
         object.__setattr__(self, "created_at", created_at)
 
 
 def create_reminder(
-    *, owner_id: str, text: str, remind_at: datetime, created_at: datetime
+    *, owner_id: str, text: str, remind_at: datetime, created_at: datetime, description: str = ""
 ) -> Reminder:
+    check_name_length(text, "text")
     return Reminder(
-        owner_id=owner_id, text=text, remind_at=remind_at, created_at=created_at
+        owner_id=owner_id, text=text, remind_at=remind_at, created_at=created_at,
+        description=description,
     )

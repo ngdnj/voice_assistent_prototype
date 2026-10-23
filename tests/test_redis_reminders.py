@@ -92,6 +92,7 @@ class RedisReminderIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "id": str(reminder.id),
                 "owner_id": "user-42",
                 "text": "Позвонить 📞",
+                "description": "",
                 "remind_at": DUE.isoformat(),
                 "created_at": CREATED.isoformat(),
             },
@@ -133,6 +134,8 @@ class RedisReminderIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ("text", " "),
             ("text", 42),
             ("text", " not normalized "),
+            ("description", " not normalized "),
+            ("description", 42),
             ("remind_at", (CREATED - timedelta(seconds=1)).isoformat()),
         ):
             payloads.append(json.dumps({**good, field: value}))
@@ -146,6 +149,16 @@ class RedisReminderIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 await self.client.set(key, payload)
                 with self.assertRaises(ReminderStorageError):
                     await self.repository.get(reminder_id=self.reminder.id, owner_id="user-42")
+
+    async def test_legacy_record_without_description(self) -> None:
+        key = self.key_for(self.reminder.id)
+        await self.repository.add(self.reminder)
+        legacy = json.loads(await self.client.get(key))
+        del legacy["description"]
+        await self.client.set(key, json.dumps(legacy))
+        self.assertEqual(
+            await self.repository.get(reminder_id=self.reminder.id, owner_id="user-42"), self.reminder
+        )
 
     async def test_wrong_redis_type(self) -> None:
         key = self.key_for(self.reminder.id)

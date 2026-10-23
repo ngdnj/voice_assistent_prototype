@@ -107,6 +107,7 @@ class RedisMeetingIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "id": str(meeting.id),
                 "owner_id": "user-42",
                 "title": "Обсуждение 📋",
+                "description": "",
                 "starts_at": START.isoformat(),
                 "ends_at": END.isoformat(),
                 "created_at": CREATED.isoformat(),
@@ -159,6 +160,8 @@ class RedisMeetingIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ("title", " "),
             ("title", 42),
             ("title", " not normalized "),
+            ("description", " not normalized "),
+            ("description", 42),
             ("starts_at", END.isoformat()),
             ("ends_at", START.isoformat()),
         ):
@@ -171,6 +174,30 @@ class RedisMeetingIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 await self.client.set(key, payload)
                 with self.assertRaises(MeetingStorageError):
                     await self.repository.get(meeting_id=self.meeting.id, owner_id="user-42")
+
+    async def test_meeting_without_end_roundtrip(self) -> None:
+        meeting = replace(self.meeting, ends_at=None)
+        key = self.key_for(meeting.id)
+        await self.repository.add(meeting)
+        self.assertNotIn("ends_at", json.loads(await self.client.get(key)))
+        loaded = await self.repository.get(meeting_id=meeting.id, owner_id="user-42")
+        self.assertEqual(loaded, meeting)
+        assert loaded is not None
+        self.assertIsNone(loaded.ends_at)
+        bad = {**json.loads(await self.client.get(key)), "ends_at": None}
+        await self.client.set(key, json.dumps(bad))
+        with self.assertRaises(MeetingStorageError):
+            await self.repository.get(meeting_id=meeting.id, owner_id="user-42")
+
+    async def test_legacy_record_without_description(self) -> None:
+        key = self.key_for(self.meeting.id)
+        await self.repository.add(self.meeting)
+        legacy = json.loads(await self.client.get(key))
+        del legacy["description"]
+        await self.client.set(key, json.dumps(legacy))
+        self.assertEqual(
+            await self.repository.get(meeting_id=self.meeting.id, owner_id="user-42"), self.meeting
+        )
 
     async def test_wrong_redis_type(self) -> None:
         key = self.key_for(self.meeting.id)

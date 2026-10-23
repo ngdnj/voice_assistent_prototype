@@ -4,7 +4,7 @@
 свободный текст и голос; бот и MAX Mini App работают с одними записями пользователя.
 
 Реализована минимальная модель задачи в `app/planner/task.py`: UUID, владелец,
-название, начальный статус `active` и явно передаваемое время создания в UTC.
+название, статус `todo`/`in_progress`/`done` (начальный `todo`) и явно передаваемое время создания в UTC.
 Добавлены прикладной `TaskService`, async-протокол `TaskRepository` и
 демонстрационный `InMemoryTaskRepository` и адаптер `RedisTaskRepository`.
 Redis временно используется как основное хранилище задач прототипа.
@@ -95,7 +95,7 @@ task = create_task(
     created_at=datetime(2026, 10, 21, 9, 30, tzinfo=UTC),
 )
 assert task.title == "Подготовить отчёт"
-assert task.status == "active"
+assert task.status == "todo"
 ```
 
 Создание и получение через прикладной сервис:
@@ -124,7 +124,7 @@ asyncio.run(main())
 In-memory хранилище предназначено только для тестов и локальных примеров:
 данные привязаны к экземпляру и не сохраняются после перезапуска.
 Для смены хранилища реализуйте async-контракт `TaskRepository`:
-`add`, `get`, `list` и `get_created`;
+`add`, `get`, `list`, `get_created` и `update_status`;
 сервис и правила модели менять не требуется.
 
 Установка закреплённых зависимостей: `uv sync --locked`.
@@ -188,6 +188,111 @@ MAX-клиента и production-потребителя здесь нет; де�
 Сбой после внешней отправки и до ACK может привести к дублю — Stream не даёт
 exactly-once доставку.
 
+## Локальный PostgreSQL (роль 4)
+
+PostgreSQL станет постоянным хранилищем записей. Готовы настройки, lifecycle engine,
+Compose, схема, первая миграция и репозитории; `app/runtime.py` пока собирает
+сервисы на Redis — переключение на PostgreSQL решает роль 1.
+План и контракт роли 4: [app/mcp_server/MCP_REALISATION_PLAN.md](app/mcp_server/MCP_REALISATION_PLAN.md),
+[app/mcp_server/INTEGRATION.md](app/mcp_server/INTEGRATION.md).
+
+```bash
+docker compose up -d --wait postgres
+uv run --locked --env-file .env python -m app.storage.postgres.engine   # «PostgreSQL доступен»
+uv run --locked --env-file .env alembic upgrade head                      # схема в POSTGRES_DB
+RUN_PG_INTEGRATION=1 uv run --locked --env-file .env pytest -q tests/storage_pg
+```
+
+Схема — `app/storage/postgres/tables.py`, миграции — `migrations/` (Alembic, `alembic.ini` в корне,
+адрес БД берётся из `POSTGRES_*`, в ini пароля нет). Таблица `events` хранит задачи, встречи и
+напоминания: момент записи (`scheduled_at`: начало встречи, время напоминания, точный срок задачи),
+`due_date` для срока без времени, `ends_at`, статус только у задач и генерируемый `tsvector`
+(`russian`, название + описание) с GIN-индексом. Правила модели продублированы `CHECK`-ограничениями.
+Таблица `operations` — результат логического создания с ключом `(owner_id, operation_type, operation_id)`.
+Перед применением посмотреть SQL: `alembic upgrade head --sql`. Новая миграция — `alembic revision
+--autogenerate -m "..."` с обязательной ручной проверкой; применённые миграции не редактируются.
+Тесты миграций выполняют `downgrade base` и `upgrade head` только в `POSTGRES_TEST_DB`.
+
+Репозитории `PostgresTaskRepository`, `PostgresMeetingRepository`, `PostgresReminderRepository`
+(`app/storage/postgres/{tasks,meetings,reminders}.py`) реализуют те же протоколы planner, что и
+Redis-адаптеры, и подставляются в существующие сервисы без их изменения:
+
+```python
+from app.planner.service import TaskService
+from app.storage.postgres.engine import postgres_engine, session_factory
+from app.storage.postgres.settings import PostgresSettings
+from app.storage.postgres.tasks import PostgresTaskRepository
+
+
+async def pg_example(clock):
+    async with postgres_engine(PostgresSettings.from_env()) as engine:
+        service = TaskService(repository=PostgresTaskRepository(session_factory(engine)), clock=clock)
+        task = await service.create_task(owner_id="user-42", title="Отчёт", operation_id="example-5")
+        await service.update_status(task_id=task.id, owner_id="user-42", status="done")
+```
+
+- Каждый метод открывает свою `AsyncSession`. Создание записи и строки `operations` — одна
+  транзакция; параллельные повторы одной операции разрешает `INSERT … ON CONFLICT DO NOTHING`:
+  проигравший откатывает свою запись и возвращает запись победителя. Тот же `operation_id`
+  с другими данными — `OperationConflictError`. Повтор после смены статуса возвращает текущую задачу.
+- Все запросы фильтруют владельца и тип; чужая и отсутствующая запись — `None`.
+- Период `[start_time, end_time)` и порядок `(время, UUID)` — как у Redis: задачи по `created_at`,
+  встречи по началу, напоминания по времени напоминания.
+- `query` — PostgreSQL FTS (`websearch_to_tsquery('russian', …)`) по названию и описанию, с морфологией
+  («встречу» находит «Встреча»). В отличие от Redis, это не поиск подстроки: «отч» не найдёт «отчёт».
+  Лимита 1000 кандидатов нет — поиск идёт по GIN-индексу.
+- Ошибки драйвера и сети — `TaskStorageError`/`MeetingStorageError`/`ReminderStorageError` без деталей.
+
+Compose запускает `postgres:18-alpine` на `127.0.0.1:5433` (порт 5433 не конфликтует
+с локально установленным сервером на 5432) с именованным томом `postgres-data`:
+данные переживают перезапуск контейнера; `docker compose down -v` их удаляет.
+При первом создании тома скрипт `docker/postgres/init-test-db.sql` создаёт
+отдельную БД `it_gorky_test`. Интеграционные тесты подключаются только к
+`POSTGRES_TEST_DB` и отказываются работать, если в имени нет `test`.
+Пароль `local-dev-only` — пример для локальной разработки, не для общих окружений.
+
+`PostgresSettings.from_env()` (`app/storage/postgres/settings.py`) читает
+`POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`,
+`POSTGRES_CONNECT_TIMEOUT`, `POSTGRES_COMMAND_TIMEOUT` (секунды, по умолчанию 5) и
+`POSTGRES_POOL_SIZE`. `postgres_engine(settings)` (`app/storage/postgres/engine.py`) —
+async context manager на время жизни процесса: создаёт engine и pool, проверяет
+`SELECT 1`, закрывает pool при любом выходе. `session_factory(engine)` выдаёт
+по одной `AsyncSession` на операцию. Импорт модулей не подключается к БД.
+
+## MCP server (роль 4)
+
+Три инструмента для агента — `create_event`, `get_events_by_period`, `get_event_by_query` — на
+FastMCP поверх тех же сервисов planner и PostgreSQL-репозиториев. Контракт для ролей 1, 3 и 5,
+заголовки и примеры: [app/mcp_server/INTEGRATION.md](app/mcp_server/INTEGRATION.md).
+
+```bash
+docker compose up -d --wait postgres
+uv run --locked --env-file .env alembic upgrade head
+# MCP_SERVICE_TOKEN в .env — не меньше 32 символов, общий с agent worker
+uv run --locked --env-file .env python -m app.mcp_server     # http://127.0.0.1:8001/mcp
+RUN_PG_INTEGRATION=1 uv run --locked --env-file .env pytest -q tests/mcp_server
+```
+
+Владелец, часовой пояс и идентификатор действия приходят в заголовках от agent worker
+(`Authorization: Bearer`, `X-Owner-Id`, `X-Timezone`, `X-Action-Id`), а не из аргументов модели.
+Ошибки возвращаются в результате инструмента: `{"error": {"code", "message", "field"}}`;
+пустая выдача — `{"events": []}`. Пока роль 1 не решила, где монтировать MCP в общем API,
+сервер работает отдельным процессом (вместе с REST Mini App); по `SIGINT`/`SIGTERM` uvicorn
+завершает текущие запросы.
+
+## REST для MAX Mini App (роль 4)
+
+Тот же процесс `python -m app.mcp_server` отдаёт `/api/events` (период и вкладки), `/api/events/search`
+и `PATCH /api/tasks/{id}/status`, если задан `MAX_BOT_TOKEN`. Каждый запрос несёт исходную `initData`
+в заголовке `X-Max-Init-Data`; сервер проверяет подпись по алгоритму MAX и свежесть (сутки), владелец —
+`str(user.id)` из проверенных данных. Ответы и ошибки — в формате MCP, см. раздел 4
+[INTEGRATION.md](app/mcp_server/INTEGRATION.md). Тесты: `RUN_PG_INTEGRATION=1 ... pytest -q tests/api_records`.
+
+Метрики роли 4 (`assistant_record_operations_total`, `assistant_record_operation_seconds`, метки
+operation/transport/outcome без пользовательских данных) отдаются этим процессом на `/metrics/`.
+CI (`.github/workflows/backend.yml`) поднимает отдельный PostgreSQL `it_gorky_test`, применяет миграции,
+выполняет `alembic check` и интеграционные тесты с `RUN_PG_INTEGRATION=1`.
+
 ## Задачи в Redis: временное хранилище прототипа
 
 `RedisTaskRepository` реализует существующий `TaskRepository`; сервис и его
@@ -213,7 +318,8 @@ async def task_example():
 ```
 
 Схема ключа: `it-gorky:v1:task:<UUID>`. Значение — JSON с полями `id`,
-`owner_id`, `title`, `status`, `created_at`: UUID и статус записываются строками,
+`owner_id`, `title`, `description`, `status`, `created_at`: UUID и статус записываются строками
+(старое значение `active` читается как `todo`, запись без `description` — как пустое описание),
 время — ISO 8601 с UTC-смещением `+00:00`, включая микросекунды.
 `v1` обозначает версию формата. Для изолированных тестов допускается свой
 `key_prefix`, например `it-gorky:test:<UUID>`; версия и суффикс задачи сохраняются.
@@ -244,10 +350,12 @@ async def task_example():
 
 Встречи реализованы отдельно от задач: `Meeting`, `MeetingService`, async-протокол
 `MeetingRepository` и `RedisMeetingRepository`. Поля: UUID, владелец, название,
-`starts_at`, `ends_at`, `created_at`. Название очищается по краям; владелец и
+`description`, `starts_at`, `ends_at`, `created_at`. Название очищается по краям; владелец и
 название не могут быть пустыми. Все моменты проверяются через общий `to_utc`,
-окончание обязано быть строго позже начала. Начало и конец всегда задаёт
-вызывающий код; длительность не назначается автоматически.
+окончание необязательно (`ends_at=None` — длительность неизвестна), а если задано,
+обязано быть строго позже начала. Начало и конец задаёт вызывающий код;
+длительность не назначается автоматически. Отсутствующее окончание не входит
+в отпечаток операции.
 
 ```python
 from datetime import UTC, datetime
@@ -271,7 +379,7 @@ async def meeting_example(client):
 ```
 
 Клиент берётся из существующего `redis_connection`, нового подключения на
-операцию нет. Ключ: `it-gorky:v1:meeting:<UUID>`, JSON содержит все шесть полей,
+операцию нет. Ключ: `it-gorky:v1:meeting:<UUID>`, JSON содержит поля модели (`ends_at` пишется только при наличии окончания; запись без `description` читается с пустым описанием),
 UUID и UTC-моменты сериализуются строками без потери микросекунд. Запись —
 `SET NX` без TTL; конфликт UUID даёт `MeetingAlreadyExistsError`, ошибки Redis
 или повреждённые данные — `MeetingStorageError`. Чужая и отсутствующая встреча
@@ -298,7 +406,7 @@ UUID и UTC-моменты сериализуются строками без п
 После наступления срока сохранённое напоминание продолжает читаться без изменений.
 
 **Доставка отделена от данных:** модель и JSON содержат только `id`, `owner_id`,
-`text`, `remind_at`, `created_at`. Полей `sent`, статуса доставки и попыток нет.
+`text`, `description`, `remind_at`, `created_at`. Полей `sent`, статуса доставки и попыток нет.
 Отдельная запись состояния доставки в этом блоке не создаётся. Успешное создание
 означает только сохранение данных, не постановку на отправку и не отправленное
 сообщение. Будущий dispatcher должен хранить состояние отправок отдельно,
@@ -331,10 +439,38 @@ async def reminder_example(client):
 Планировщик, отправка MAX и повторяющиеся напоминания не реализованы. Проверки — `tests/test_reminder.py` и `tests/test_redis_reminders.py`;
 интеграционные включаются общим `RUN_REDIS_INTEGRATION=1`.
 
+## Срок задачи
+
+Задача может не иметь срока, иметь `due_date` (дата без времени, хранится как `date`, без
+подстановки полуночи) или `due_at` (точный момент, переводится в UTC через `to_utc`). Оба сразу —
+`ValueError`. Срок входит в отпечаток операции; отсутствующий срок не добавляется, поэтому
+прежние операции повторяются без конфликта. В Redis поля `due_date`/`due_at` пишутся только при
+наличии срока; выборка за период по-прежнему идёт по `created_at`.
+
+## Статус задачи
+
+`TaskService.update_status(task_id=..., owner_id=..., status=...)` меняет статус на
+`todo`, `in_progress` или `done`; переходы не ограничены, повтор того же статуса ничего
+не меняет. Отсутствующая и чужая задача одинаково дают `None`, неизвестный статус —
+`ValueError` до обращения к хранилищу. Redis-адаптер перезаписывает запись через
+compare-and-set (Lua): если запись изменилась между чтением и записью, попытка
+повторяется до 3 раз, затем `TaskStorageError`. Индекс и история операций не меняются;
+повтор создания тем же `operation_id` возвращает задачу в текущем состоянии.
+
+## Описание записей
+
+У задачи, встречи и напоминания есть необязательное `description` (по умолчанию `""`).
+Крайние пробелы удаляются, длина — до 2000 символов (`app/planner/fields.py`).
+Описание входит в отпечаток операции: повтор того же `operation_id` с другим описанием —
+`OperationConflictError`. Пустое описание в отпечаток не добавляется, поэтому операции,
+сохранённые до появления поля, повторяются без конфликта. Поиск `RecordQuery.query` в Redis
+по-прежнему ищет только по названию/тексту; поиск по описанию — PostgreSQL FTS роли 4.
+
 ## Идемпотентность создания
 
 Сервисы создания задач, встреч и напоминаний требуют `operation_id` от адаптера.
-Область уникальности: владелец + тип операции + operation_id. Те же
+Область уникальности в Redis: владелец + тип операции + operation_id (в PostgreSQL —
+владелец + operation_id: тот же идентификатор для записи другого типа — конфликт). Те же
 нормализованные данные возвращают первоначальные UUID и created_at,
 другие — `OperationConflictError`. Запись, индекс и JSON результата сохраняются
 одним Lua-вызовом Redis. TTL у истории операций нет: автоматическое истечение

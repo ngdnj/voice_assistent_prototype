@@ -4,6 +4,7 @@ from collections.abc import Callable
 from datetime import datetime
 from uuid import UUID
 
+from app.planner.fields import description_fingerprint_data
 from app.planner.meeting import Meeting, create_meeting
 from app.planner.meeting_repository import MeetingRepository
 from app.planner.operation import CreationOperation
@@ -17,11 +18,16 @@ class MeetingService:
         self._clock = clock
 
     async def create_meeting(
-        self, *, owner_id: str, title: str, starts_at: datetime, ends_at: datetime, operation_id: str
+        self, *, owner_id: str, title: str, starts_at: datetime, operation_id: str,
+        ends_at: datetime | None = None, description: str = "",
     ) -> Meeting:
-        starts_at, ends_at = to_utc(starts_at), to_utc(ends_at)
+        starts_at = to_utc(starts_at)
+        ends_at = None if ends_at is None else to_utc(ends_at)
+        # A missing end is omitted; operations stored before it became optional always had one.
+        end: dict[str, str] = {} if ends_at is None else {"ends_at": ends_at.isoformat()}
         operation = CreationOperation.from_data(
-            operation_id, title=title.strip(), starts_at=starts_at.isoformat(), ends_at=ends_at.isoformat()
+            operation_id, title=title.strip(), starts_at=starts_at.isoformat(),
+            **end, **description_fingerprint_data(description),
         )
         previous = await self._repository.get_created(owner_id=owner_id, operation=operation)
         if previous is not None:
@@ -32,6 +38,7 @@ class MeetingService:
             starts_at=starts_at,
             ends_at=ends_at,
             created_at=self._clock(),
+            description=description,
         )
         return await self._repository.add(meeting, operation=operation)
 

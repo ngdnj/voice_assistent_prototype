@@ -12,6 +12,11 @@ dependencies = [
     "prometheus-client>=0.26",
     "pydantic-settings>=2.16",
     "tzdata>=2026.5",
+    # Role 4 (PostgreSQL + MCP): app/storage/postgres, migrations
+    "sqlalchemy[asyncio]>=2.1,<2.2",
+    "asyncpg>=0.32,<0.33",
+    "alembic>=1.20,<2",
+    "fastapi>=0.161,<0.162",
 ]
 
 [project.optional-dependencies]
@@ -45,7 +50,12 @@ target-version = "py312"
 extend-exclude = [
     "*.md",
     "app/planner",
-    "app/storage",
+    # Role 1 storage files; app/storage/postgres (role 4) is checked.
+    "app/storage/__init__.py",
+    "app/storage/memory.py",
+    "app/storage/notification_stream.py",
+    "app/storage/redis*.py",
+    "app/storage/reindex.py",
     "tests/test_redis.py",
     "tests/test_redis_tasks.py",
     "tests/test_task.py",
@@ -64,4 +74,12 @@ python_version = "3.12"
 strict = true
 ignore_missing_imports = true
 # Role 3 paths; other roles add theirs.
-files = ["app/llm", "app/asr", "app/config.py", "app/metrics.py", "evals"]
+files = [
+    "app/llm", "app/asr", "app/config.py", "app/metrics.py", "evals",
+    # Role 4
+    "app/storage/postgres",
+    "app/mcp_server",
+    "app/api/records.py",
+    "app/api/init_data.py",
+    "migrations",
+]

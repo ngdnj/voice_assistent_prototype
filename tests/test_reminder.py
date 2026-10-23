@@ -69,7 +69,8 @@ class ReminderTests(unittest.TestCase):
 
     def test_reminder_contains_no_delivery_state(self) -> None:
         self.assertEqual(
-            {f.name for f in fields(Reminder)}, {"id", "owner_id", "text", "remind_at", "created_at"}
+            {f.name for f in fields(Reminder)},
+            {"id", "owner_id", "text", "description", "remind_at", "created_at"},
         )
 
 
