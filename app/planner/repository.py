@@ -5,7 +5,7 @@ from uuid import UUID
 
 from app.planner.operation import CreationOperation
 from app.planner.query import RecordQuery
-from app.planner.task import Task
+from app.planner.task import Task, TaskStatus
 
 
 class TaskStorageError(Exception):
@@ -31,4 +31,8 @@ class TaskRepository(Protocol):
 
     async def get_created(self, *, owner_id: str, operation: CreationOperation) -> Task | None:
         """Replay a matching creation or raise OperationConflictError."""
+        ...
+
+    async def update_status(self, *, task_id: UUID, owner_id: str, status: TaskStatus) -> Task | None:
+        """Store a new status of the owner's task; None for missing or inaccessible tasks."""
         ...

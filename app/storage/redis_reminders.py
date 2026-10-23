@@ -37,6 +37,7 @@ class RedisReminderRepository:
                 "id": str(reminder.id),
                 "owner_id": reminder.owner_id,
                 "text": reminder.text,
+                "description": reminder.description,
                 "remind_at": reminder.remind_at.isoformat(),
                 "created_at": reminder.created_at.isoformat(),
             },
@@ -86,7 +87,8 @@ class RedisReminderRepository:
     def _decode(payload: str | bytes, reminder_id: UUID) -> Reminder:
         try:
             data = json.loads(payload)
-            if not isinstance(data, dict) or set(data) != {
+            # Records written before "description" existed have no such field.
+            if not isinstance(data, dict) or set(data) - {"description"} != {
                 "id",
                 "owner_id",
                 "text",
@@ -102,9 +104,12 @@ class RedisReminderRepository:
             moments = {name: datetime.fromisoformat(data[name]) for name in ("remind_at", "created_at")}
             if any(value.utcoffset() != timedelta(0) for value in moments.values()):
                 raise ValueError("Expected UTC timestamps")
-            reminder = Reminder(id=stored_id, owner_id=data["owner_id"], text=data["text"], **moments)
-            if reminder.text != data["text"]:
-                raise ValueError("Expected normalized text")
+            reminder = Reminder(
+                id=stored_id, owner_id=data["owner_id"], text=data["text"],
+                description=data.get("description", ""), **moments,
+            )
+            if reminder.text != data["text"] or reminder.description != data.get("description", ""):
+                raise ValueError("Expected normalized text and description")
             return reminder
         except (ValueError, TypeError, UnicodeError, RecursionError):
             raise ReminderStorageError("Stored reminder data is invalid") from None

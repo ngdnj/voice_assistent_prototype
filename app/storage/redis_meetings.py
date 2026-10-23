@@ -32,17 +32,18 @@ class RedisMeetingRepository:
         return f"{self._key_prefix}:v1:meeting:{meeting_id}"
 
     async def add(self, meeting: Meeting, *, operation: CreationOperation | None = None) -> Meeting:
-        payload = json.dumps(
-            {
-                "id": str(meeting.id),
-                "owner_id": meeting.owner_id,
-                "title": meeting.title,
-                "starts_at": meeting.starts_at.isoformat(),
-                "ends_at": meeting.ends_at.isoformat(),
-                "created_at": meeting.created_at.isoformat(),
-            },
-            ensure_ascii=False,
-        )
+        data = {
+            "id": str(meeting.id),
+            "owner_id": meeting.owner_id,
+            "title": meeting.title,
+            "description": meeting.description,
+            "starts_at": meeting.starts_at.isoformat(),
+            "created_at": meeting.created_at.isoformat(),
+        }
+        # A meeting without a known end stores no "ends_at".
+        if meeting.ends_at is not None:
+            data["ends_at"] = meeting.ends_at.isoformat()
+        payload = json.dumps(data, ensure_ascii=False)
         try:
             if operation is not None:
                 saved = await commit_operation(
@@ -87,12 +88,12 @@ class RedisMeetingRepository:
     def _decode(payload: str | bytes, meeting_id: UUID) -> Meeting:
         try:
             data = json.loads(payload)
-            if not isinstance(data, dict) or set(data) != {
+            # Records written before "description" existed have no such field; the end is optional.
+            if not isinstance(data, dict) or set(data) - {"description", "ends_at"} != {
                 "id",
                 "owner_id",
                 "title",
                 "starts_at",
-                "ends_at",
                 "created_at",
             }:
                 raise ValueError("Invalid fields")
@@ -102,13 +103,18 @@ class RedisMeetingRepository:
             if stored_id != meeting_id:
                 raise ValueError("Invalid identity")
             moments = {
-                name: datetime.fromisoformat(data[name]) for name in ("starts_at", "ends_at", "created_at")
+                name: datetime.fromisoformat(data[name])
+                for name in ("starts_at", "ends_at", "created_at")
+                if name in data
             }
             if any(value.utcoffset() != timedelta(0) for value in moments.values()):
                 raise ValueError("Expected UTC timestamps")
-            meeting = Meeting(id=stored_id, owner_id=data["owner_id"], title=data["title"], **moments)
-            if meeting.title != data["title"]:
-                raise ValueError("Expected normalized title")
+            meeting = Meeting(
+                id=stored_id, owner_id=data["owner_id"], title=data["title"],
+                description=data.get("description", ""), **moments,
+            )
+            if meeting.title != data["title"] or meeting.description != data.get("description", ""):
+                raise ValueError("Expected normalized title and description")
             return meeting
         except (ValueError, TypeError, UnicodeError, RecursionError):
             raise MeetingStorageError("Stored meeting data is invalid") from None

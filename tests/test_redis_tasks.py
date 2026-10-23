@@ -3,12 +3,13 @@ import json
 import os
 import unittest
 from dataclasses import replace
-from datetime import UTC, datetime
-from unittest.mock import AsyncMock
+from datetime import UTC, date, datetime
+from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 from redis.exceptions import ConnectionError
 
+from app.planner.query import RecordQuery
 from app.planner.repository import TaskAlreadyExistsError, TaskStorageError
 from app.planner.service import TaskService
 from app.planner.task import create_task
@@ -87,7 +88,8 @@ class RedisTaskIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "id": str(task.id),
                 "owner_id": "user-42",
                 "title": "Отчёт 📋",
-                "status": "active",
+                "description": "",
+                "status": "todo",
                 "created_at": CREATED_AT.isoformat(),
             },
         )
@@ -130,7 +132,7 @@ class RedisTaskIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "id": str(task.id),
             "owner_id": task.owner_id,
             "title": task.title,
-            "status": "active",
+            "status": "todo",
             "created_at": CREATED_AT.isoformat(),
         }
         bad_records = ["not JSON", "[]", "{}", b"\xff"]
@@ -140,8 +142,12 @@ class RedisTaskIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ("owner_id", " "),
             ("title", " "),
             ("title", " untrimmed "),
+            ("description", " untrimmed "),
+            ("description", 123),
+            ("description", "x" * 2001),
             ("title", 123),
-            ("status", "done"),
+            ("status", "archived"),
+            ("status", "TODO"),
             ("created_at", "2026-10-21T09:30:00"),
             ("created_at", "2026-10-21T09:30:00+03:00"),
         ):
@@ -151,6 +157,138 @@ class RedisTaskIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 await self.client.set(key, payload)
                 with self.assertRaises(TaskStorageError):
                     await self.repository.get(task_id=task.id, owner_id=task.owner_id)
+
+    async def test_stored_statuses_and_legacy_active(self) -> None:
+        task = create_task(owner_id="user-42", title="Отчёт", created_at=CREATED_AT)
+        key = self.key_for(task.id)
+        good = {
+            "id": str(task.id),
+            "owner_id": task.owner_id,
+            "title": task.title,
+            "created_at": CREATED_AT.isoformat(),
+        }
+        for stored, expected in (
+            ("todo", "todo"), ("in_progress", "in_progress"), ("done", "done"), ("active", "todo")
+        ):
+            with self.subTest(stored=stored):
+                await self.client.set(key, json.dumps({**good, "status": stored}))
+                loaded = await self.repository.get(task_id=task.id, owner_id=task.owner_id)
+                self.assertIsNotNone(loaded)
+                assert loaded is not None
+                self.assertEqual(loaded.status, expected)
+
+    async def test_description_roundtrip_and_legacy_record(self) -> None:
+        task = create_task(owner_id="user-42", title="Отчёт", created_at=CREATED_AT, description=" Квартальный ")
+        key = self.key_for(task.id)
+        await self.repository.add(task)
+        self.assertEqual(json.loads(await self.client.get(key))["description"], "Квартальный")
+        self.assertEqual(await self.repository.get(task_id=task.id, owner_id="user-42"), task)
+        legacy = {
+            "id": str(task.id), "owner_id": "user-42", "title": "Отчёт",
+            "status": "todo", "created_at": CREATED_AT.isoformat(),
+        }
+        await self.client.set(key, json.dumps(legacy))
+        loaded = await self.repository.get(task_id=task.id, owner_id="user-42")
+        assert loaded is not None
+        self.assertEqual(loaded.description, "")
+
+    async def test_deadline_roundtrip(self) -> None:
+        for due in (
+            {"due_date": date(2026, 10, 24)},
+            {"due_at": datetime(2026, 10, 24, 15, 0, 0, 123456, tzinfo=UTC)},
+            {},
+        ):
+            with self.subTest(due=due):
+                task = create_task(owner_id="user-42", title="Отчёт", created_at=CREATED_AT, **due)
+                key = self.key_for(task.id)
+                await self.repository.add(task)
+                stored = json.loads(await self.client.get(key))
+                self.assertEqual(
+                    {name: stored[name] for name in ("due_date", "due_at") if name in stored},
+                    {name: value.isoformat() for name, value in due.items()},
+                )
+                self.assertEqual(await self.repository.get(task_id=task.id, owner_id="user-42"), task)
+
+    async def test_corrupted_deadline_is_storage_error(self) -> None:
+        task = create_task(owner_id="user-42", title="Отчёт", created_at=CREATED_AT)
+        key = self.key_for(task.id)
+        good = {
+            "id": str(task.id),
+            "owner_id": task.owner_id,
+            "title": task.title,
+            "status": "todo",
+            "created_at": CREATED_AT.isoformat(),
+        }
+        for extra in (
+            {"due_date": "2026-10-24", "due_at": "2026-10-24T15:00:00+00:00"},
+            {"due_date": "20261024"},
+            {"due_date": "2026-10-24T00:00:00"},
+            {"due_date": None},
+            {"due_at": "2026-10-24T18:00:00+03:00"},
+            {"due_at": "2026-10-24T18:00:00"},
+            {"due_at": "2026-10-24"},
+        ):
+            with self.subTest(extra=extra):
+                await self.client.set(key, json.dumps({**good, **extra}))
+                with self.assertRaises(TaskStorageError):
+                    await self.repository.get(task_id=task.id, owner_id=task.owner_id)
+
+    async def test_status_update_persists_and_respects_owner(self) -> None:
+        service = TaskService(repository=self.repository, clock=lambda: CREATED_AT)
+        task = await service.create_task(
+            owner_id="user-42", title="Отчёт", description="Квартальный", operation_id="status-1"
+        )
+        key = self.key_for(task.id)
+        before = json.loads(await self.client.get(key))
+        self.assertIsNone(await service.update_status(task_id=task.id, owner_id="other", status="done"))
+        self.assertIsNone(await service.update_status(task_id=uuid4(), owner_id="user-42", status="done"))
+        updated = await service.update_status(task_id=task.id, owner_id="user-42", status="in_progress")
+        assert updated is not None
+        self.assertEqual(updated.status, "in_progress")
+        # Only the status field changes; the record keeps no TTL.
+        self.assertEqual(json.loads(await self.client.get(key)), {**before, "status": "in_progress"})
+        self.assertEqual(await self.client.ttl(key), -1)
+        async with redis_connection(RedisSettings.from_env()) as client:
+            loaded = await RedisTaskRepository(client, key_prefix=self.prefix).get(task_id=task.id, owner_id="user-42")
+        self.assertEqual(loaded, updated)
+        listed = await self.repository.list(RecordQuery(owner_id="user-42"))
+        self.assertEqual(listed, [updated])
+        # Replaying the creation returns the same task in its current state, not an error.
+        replay = await service.create_task(
+            owner_id="user-42", title="Отчёт", description="Квартальный", operation_id="status-1"
+        )
+        self.assertEqual(replay, updated)
+
+    async def test_status_update_of_legacy_active_record(self) -> None:
+        task = create_task(owner_id="user-42", title="Отчёт", created_at=CREATED_AT)
+        key = self.key_for(task.id)
+        await self.client.set(key, json.dumps({
+            "id": str(task.id), "owner_id": "user-42", "title": "Отчёт",
+            "status": "active", "created_at": CREATED_AT.isoformat(),
+        }))
+        updated = await self.repository.update_status(task_id=task.id, owner_id="user-42", status="done")
+        assert updated is not None
+        self.assertEqual(json.loads(await self.client.get(key))["status"], "done")
+
+    async def test_concurrent_status_change_is_not_overwritten_silently(self) -> None:
+        task = create_task(owner_id="user-42", title="Отчёт", created_at=CREATED_AT)
+        key = self.key_for(task.id)
+        await self.repository.add(task)
+        original_get = self.client.get
+        writes = iter(range(100))
+
+        async def changed_by_someone_else(name):
+            payload = await original_get(name)
+            # Another writer changes the record between our read and compare-and-set.
+            data = json.loads(payload)
+            data["title"] = f"Изменено {next(writes)}"
+            await self.client.set(key, json.dumps(data, ensure_ascii=False))
+            return payload
+
+        with patch.object(self.client, "get", side_effect=changed_by_someone_else):
+            with self.assertRaises(TaskStorageError):
+                await self.repository.update_status(task_id=task.id, owner_id="user-42", status="done")
+        self.assertEqual(json.loads(await self.client.get(key))["status"], "todo")
 
     async def test_wrong_redis_type_is_storage_error(self) -> None:
         task_id = uuid4()

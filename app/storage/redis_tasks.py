@@ -1,7 +1,8 @@
 """Versioned JSON task storage for the Redis-backed prototype."""
 
 import json
-from datetime import datetime, timedelta
+from dataclasses import replace
+from datetime import date, datetime, timedelta
 from uuid import UUID
 
 from redis.asyncio import Redis
@@ -10,7 +11,7 @@ from redis.exceptions import RedisError
 from app.planner.operation import CreationOperation
 from app.planner.query import QueryTooBroadError, RecordQuery
 from app.planner.repository import TaskAlreadyExistsError, TaskStorageError
-from app.planner.task import Task
+from app.planner.task import TASK_STATUSES, Task, TaskStatus
 from app.storage.redis_index import (
     ADD_INDEXED,
     INDEX_EXISTING,
@@ -19,6 +20,15 @@ from app.storage.redis_index import (
     read_index,
 )
 from app.storage.redis_operation import commit_operation, operation_key, read_operation
+
+
+# Compare-and-set: the record is replaced only if nobody changed it since it was read.
+REPLACE_IF_UNCHANGED = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+redis.call('SET', KEYS[1], ARGV[2])
+return 1
+"""
+MAX_STATUS_ATTEMPTS = 3
 
 
 class RedisTaskRepository:
@@ -31,17 +41,25 @@ class RedisTaskRepository:
     def _key(self, task_id: UUID) -> str:
         return f"{self._key_prefix}:v1:task:{task_id}"
 
+    @staticmethod
+    def _encode(task: Task) -> str:
+        data = {
+            "id": str(task.id),
+            "owner_id": task.owner_id,
+            "title": task.title,
+            "description": task.description,
+            "status": task.status,
+            "created_at": task.created_at.isoformat(),
+        }
+        # A task without a deadline stores neither field.
+        if task.due_date is not None:
+            data["due_date"] = task.due_date.isoformat()
+        if task.due_at is not None:
+            data["due_at"] = task.due_at.isoformat()
+        return json.dumps(data, ensure_ascii=False)
+
     async def add(self, task: Task, *, operation: CreationOperation | None = None) -> Task:
-        payload = json.dumps(
-            {
-                "id": str(task.id),
-                "owner_id": task.owner_id,
-                "title": task.title,
-                "status": task.status,
-                "created_at": task.created_at.isoformat(),
-            },
-            ensure_ascii=False,
-        )
+        payload = self._encode(task)
         try:
             if operation is not None:
                 saved = await commit_operation(
@@ -82,28 +100,64 @@ class RedisTaskRepository:
         task = self._decode(payload, task_id)
         return task if task.owner_id == owner_id else None
 
+    async def update_status(self, *, task_id: UUID, owner_id: str, status: TaskStatus) -> Task | None:
+        try:
+            for _ in range(MAX_STATUS_ATTEMPTS):
+                payload = await self._client.get(self._key(task_id))
+                if payload is None:
+                    return None
+                task = self._decode(payload, task_id)
+                if task.owner_id != owner_id:
+                    return None
+                if task.status == status:
+                    return task
+                updated = replace(task, status=status)
+                # Index members use created_at and ID, so the index stays valid.
+                if await self._client.eval(
+                    REPLACE_IF_UNCHANGED, 1, self._key(task_id), payload, self._encode(updated)
+                ):
+                    return updated
+        except (RedisError, UnicodeError):
+            raise TaskStorageError("Task status update failed") from None
+        raise TaskStorageError("Task changed concurrently; retry the status update")
+
     @staticmethod
     def _decode(payload: str | bytes, task_id: UUID) -> Task:
         try:
             data = json.loads(payload)
-            if not isinstance(data, dict) or set(data) != {"id", "owner_id", "title", "status", "created_at"}:
+            # Records written before "description" existed have no such field; deadlines are optional.
+            if not isinstance(data, dict) or set(data) - {"description", "due_date", "due_at"} != {
+                "id", "owner_id", "title", "status", "created_at"
+            }:
                 raise ValueError("Invalid fields")
             if not all(isinstance(value, str) for value in data.values()):
                 raise ValueError("Invalid field types")
             stored_id = UUID(data["id"])
-            if stored_id != task_id or data["status"] != "active":
+            # "active" was the only status before todo/in_progress/done; read it as "todo".
+            status = "todo" if data["status"] == "active" else data["status"]
+            if stored_id != task_id or status not in TASK_STATUSES:
                 raise ValueError("Invalid identity or status")
             created_at = datetime.fromisoformat(data["created_at"])
-            if created_at.utcoffset() != timedelta(0):
+            due_date = date.fromisoformat(data["due_date"]) if "due_date" in data else None
+            due_at = datetime.fromisoformat(data["due_at"]) if "due_at" in data else None
+            if created_at.utcoffset() != timedelta(0) or (
+                due_at is not None and due_at.utcoffset() != timedelta(0)
+            ):
                 raise ValueError("Expected UTC timestamp")
+            if due_date is not None and due_date.isoformat() != data["due_date"]:
+                raise ValueError("Expected ISO date")
             task = Task(
                 id=stored_id,
                 owner_id=data["owner_id"],
                 title=data["title"],
+                description=data.get("description", ""),
+                status=status,
                 created_at=created_at,
+                due_date=due_date,
+                due_at=due_at,
             )
-            if task.title != data["title"]:
-                raise ValueError("Expected normalized title")
+            if task.title != data["title"] or task.description != data.get("description", ""):
+                raise ValueError("Expected normalized title and description")
             return task
         except (ValueError, TypeError, UnicodeError, RecursionError):
             raise TaskStorageError("Stored task data is invalid") from None
@@ -181,8 +235,12 @@ class RedisTaskRepository:
             score = await self._client.zscore(
                 index_key(self._key_prefix, "task", owner_id), index_member(record.created_at, record.id)
             )
-            if actual != payload or score != 0:
+            if actual is None or score != 0:
                 raise ValueError("Operation result is inconsistent with record/index")
-            return record
+            current = self._decode(actual, record.id)
+            # Only the status may change after creation; return the current state.
+            if replace(current, status=record.status) != record:
+                raise ValueError("Operation result is inconsistent with record")
+            return current
         except (RedisError, UnicodeError, ValueError, TypeError, KeyError):
             raise TaskStorageError("Task operation result is invalid") from None

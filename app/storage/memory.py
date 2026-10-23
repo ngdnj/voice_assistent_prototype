@@ -1,11 +1,12 @@
 """Demo/test storage only: tasks are lost when this instance is discarded."""
 
+from dataclasses import replace
 from uuid import UUID
 
 from app.planner.operation import CreationOperation, OperationConflictError
 from app.planner.query import MAX_SEARCH_CANDIDATES, QueryTooBroadError, RecordQuery
 from app.planner.repository import TaskAlreadyExistsError
-from app.planner.task import Task
+from app.planner.task import Task, TaskStatus
 
 
 class InMemoryTaskRepository:
@@ -34,13 +35,22 @@ class InMemoryTaskRepository:
         fingerprint, task = saved
         if fingerprint != operation.fingerprint:
             raise OperationConflictError("operation_id was already used with different data")
-        return task
+        # Return the current state: the status may have changed since creation.
+        return self._tasks[task.id]
 
     async def get(self, *, task_id: UUID, owner_id: str) -> Task | None:
         task = self._tasks.get(task_id)
         if task is None or task.owner_id != owner_id:
             return None
         return task
+
+    async def update_status(self, *, task_id: UUID, owner_id: str, status: TaskStatus) -> Task | None:
+        task = await self.get(task_id=task_id, owner_id=owner_id)
+        if task is None:
+            return None
+        updated = replace(task, status=status)
+        self._tasks[task_id] = updated
+        return updated
 
     async def list(self, query: RecordQuery) -> list[Task]:
         records = sorted(

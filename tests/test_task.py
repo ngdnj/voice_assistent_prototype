@@ -22,7 +22,7 @@ class TaskTests(unittest.TestCase):
         self.assertIsInstance(task.id, UUID)
         self.assertEqual(task.owner_id, "user-42")
         self.assertEqual(task.title, "Подготовить отчёт")
-        self.assertEqual(task.status, "active")
+        self.assertEqual(task.status, "todo")
 
     def test_strip_outer_title_whitespace(self) -> None:
         task = create_task(
@@ -38,6 +38,17 @@ class TaskTests(unittest.TestCase):
                     values[field_name] = value
                     with self.assertRaisesRegex(ValueError, field_name):
                         create_task(**values, created_at=CREATED_AT)
+
+    def test_restore_allowed_statuses(self) -> None:
+        for status in ("todo", "in_progress", "done"):
+            with self.subTest(status=status):
+                task = Task(owner_id="user-42", title="Отчёт", created_at=CREATED_AT, status=status)
+                self.assertEqual(task.status, status)
+
+    def test_reject_unknown_status(self) -> None:
+        for status in ("active", "TODO", "", "cancelled"):
+            with self.subTest(status=status), self.assertRaisesRegex(ValueError, "status"):
+                Task(owner_id="user-42", title="Отчёт", created_at=CREATED_AT, status=status)  # type: ignore[arg-type]
 
     def test_new_tasks_have_different_ids(self) -> None:
         first = create_task(owner_id="user-42", title="Отчёт", created_at=CREATED_AT)

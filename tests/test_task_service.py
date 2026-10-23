@@ -23,7 +23,7 @@ class TaskServiceTests(unittest.IsolatedAsyncioTestCase):
         fetched = await self.service.get_task(task_id=task.id, owner_id="user-42")
         self.assertEqual(fetched, task)
         self.assertEqual(task.title, "Подготовить отчёт")
-        self.assertEqual(task.status, "active")
+        self.assertEqual(task.status, "todo")
         self.assertEqual(task.created_at, CREATED_AT)
 
     async def test_unknown_task_returns_none(self) -> None:
