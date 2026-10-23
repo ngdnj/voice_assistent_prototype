@@ -188,6 +188,36 @@ MAX-клиента и production-потребителя здесь нет; де�
 Сбой после внешней отправки и до ACK может привести к дублю — Stream не даёт
 exactly-once доставку.
 
+## Локальный PostgreSQL (роль 4)
+
+PostgreSQL станет постоянным хранилищем записей. Сейчас готова только
+инфраструктура: настройки, lifecycle engine и Compose; таблиц, миграций и
+репозиториев ещё нет, приложение продолжает работать через Redis.
+План и контракт роли 4: [app/mcp_server/mcp_realisation_plan.md](app/mcp_server/mcp_realisation_plan.md),
+[app/mcp_server/INTEGRATION.md](app/mcp_server/INTEGRATION.md).
+
+```bash
+docker compose up -d --wait postgres
+uv run --locked --env-file .env python -m app.storage.postgres.engine   # «PostgreSQL доступен»
+RUN_PG_INTEGRATION=1 uv run --locked --env-file .env pytest -q tests/storage_pg
+```
+
+Compose запускает `postgres:18-alpine` на `127.0.0.1:5433` (порт 5433 не конфликтует
+с локально установленным сервером на 5432) с именованным томом `postgres-data`:
+данные переживают перезапуск контейнера; `docker compose down -v` их удаляет.
+При первом создании тома скрипт `docker/postgres/init-test-db.sql` создаёт
+отдельную БД `it_gorky_test`. Интеграционные тесты подключаются только к
+`POSTGRES_TEST_DB` и отказываются работать, если в имени нет `test`.
+Пароль `local-dev-only` — пример для локальной разработки, не для общих окружений.
+
+`PostgresSettings.from_env()` (`app/storage/postgres/settings.py`) читает
+`POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`,
+`POSTGRES_CONNECT_TIMEOUT`, `POSTGRES_COMMAND_TIMEOUT` (секунды, по умолчанию 5) и
+`POSTGRES_POOL_SIZE`. `postgres_engine(settings)` (`app/storage/postgres/engine.py`) —
+async context manager на время жизни процесса: создаёт engine и pool, проверяет
+`SELECT 1`, закрывает pool при любом выходе. `session_factory(engine)` выдаёт
+по одной `AsyncSession` на операцию. Импорт модулей не подключается к БД.
+
 ## Задачи в Redis: временное хранилище прототипа
 
 `RedisTaskRepository` реализует существующий `TaskRepository`; сервис и его
