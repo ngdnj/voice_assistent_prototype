@@ -1,4 +1,6 @@
+import traceback
 import unittest
+from dataclasses import replace
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -28,6 +30,15 @@ class PostgresEngineIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 version = await session.scalar(text("SHOW server_version_num"))
         self.assertIn("test", database)
         self.assertGreaterEqual(int(version), 170000)
+
+    async def test_wrong_password_fails_without_leaking_it(self) -> None:
+        # AGENTS §13: secrets must not appear in errors that may reach logs.
+        wrong = "never-log-this-password"
+        settings = replace(integration_settings(), password=wrong)
+        with self.assertRaises(SQLAlchemyError) as caught:
+            async with postgres_engine(settings):
+                self.fail("engine must not be yielded with a wrong password")
+        self.assertNotIn(wrong, "".join(traceback.format_exception(caught.exception)))
 
     async def test_engine_is_disposed_after_exit(self) -> None:
         async with postgres_engine(integration_settings()) as engine:

@@ -57,12 +57,13 @@ class PostgresSettingsTests(unittest.TestCase):
                 PostgresSettings(**values)  # type: ignore[arg-type]
 
     def test_integration_settings_require_test_database(self) -> None:
-        for database in ("", "it_gorky", "production"):
+        for database in ("", "it_gorky", "production", "latest", "attestation", "it_gorky_testing"):
             with (
                 self.subTest(database=database),
                 patch.dict(os.environ, {"POSTGRES_TEST_DB": database}, clear=True),
                 self.assertRaises(RuntimeError),
             ):
                 integration_settings()
-        with patch.dict(os.environ, {"POSTGRES_TEST_DB": "it_gorky_test"}, clear=True):
-            self.assertEqual(integration_settings().database, "it_gorky_test")
+        for database in ("it_gorky_test", "test", "test_it_gorky", "it_gorky_test_2"):
+            with patch.dict(os.environ, {"POSTGRES_TEST_DB": database}, clear=True):
+                self.assertEqual(integration_settings().database, database)

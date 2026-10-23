@@ -53,6 +53,8 @@ class InMemoryTaskRepository:
         return updated
 
     async def list(self, query: RecordQuery) -> list[Task]:
+        if query.task_period != "created_at":
+            raise ValueError("In-memory task storage filters periods by created_at only")
         records = sorted(
             (
                 task

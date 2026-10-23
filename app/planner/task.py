@@ -5,7 +5,7 @@ from datetime import date, datetime
 from typing import Literal
 from uuid import UUID, uuid4
 
-from app.planner.fields import normalize_description
+from app.planner.fields import check_name_length, normalize_description
 from app.planner.time import to_utc
 
 TaskStatus = Literal["todo", "in_progress", "done"]
@@ -60,6 +60,7 @@ def create_task(
     due_at: datetime | None = None,
 ) -> Task:
     """Create a task in memory using explicit time and a trusted owner ID."""
+    check_name_length(title, "title")
     return Task(
         owner_id=owner_id,
         title=title,

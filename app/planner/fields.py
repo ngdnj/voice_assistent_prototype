@@ -1,6 +1,13 @@
 """Field rules shared by tasks, meetings and reminders."""
 
 MAX_DESCRIPTION_LENGTH = 2000
+MAX_NAME_LENGTH = 200
+
+
+def check_name_length(name: str, field: str) -> None:
+    """Applied when a record is created; restoring stored records does not re-check it."""
+    if isinstance(name, str) and len(name.strip()) > MAX_NAME_LENGTH:
+        raise ValueError(f"{field} must contain at most {MAX_NAME_LENGTH} characters")
 
 
 def normalize_description(value: str) -> str:

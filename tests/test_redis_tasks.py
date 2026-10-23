@@ -14,7 +14,9 @@ from app.planner.repository import TaskAlreadyExistsError, TaskStorageError
 from app.planner.service import TaskService
 from app.planner.task import create_task
 from app.storage.redis import RedisSettings, redis_connection
-from app.storage.redis_index import index_key
+from app.planner.operation import CreationOperation
+from app.storage.redis_index import index_key, index_member
+from app.storage.redis_operation import operation_key
 from app.storage.redis_tasks import RedisTaskRepository
 
 
@@ -269,6 +271,30 @@ class RedisTaskIntegrationTests(unittest.IsolatedAsyncioTestCase):
         updated = await self.repository.update_status(task_id=task.id, owner_id="user-42", status="done")
         assert updated is not None
         self.assertEqual(json.loads(await self.client.get(key))["status"], "done")
+
+    async def test_legacy_record_and_operation_survive_status_change(self) -> None:
+        # Data written before B0: status "active", no description, fingerprint of {title} only.
+        task = create_task(owner_id="user-42", title="Отчёт", created_at=CREATED_AT)
+        key = self.key_for(task.id)
+        legacy = json.dumps({
+            "id": str(task.id), "owner_id": "user-42", "title": "Отчёт",
+            "status": "active", "created_at": CREATED_AT.isoformat(),
+        }, ensure_ascii=False)
+        operation = CreationOperation.from_data("legacy-op", title="Отчёт")
+        await self.client.set(key, legacy)
+        await self.client.zadd(index_key(self.prefix, "task", "user-42"), {index_member(CREATED_AT, task.id): 0})
+        await self.client.set(
+            operation_key(self.prefix, "task", "user-42", "legacy-op"), f"{operation.fingerprint}\n{legacy}"
+        )
+        service = TaskService(repository=self.repository, clock=lambda: CREATED_AT)
+        replay = await service.create_task(owner_id="user-42", title="Отчёт", operation_id="legacy-op")
+        self.assertEqual((replay.id, replay.status, replay.description), (task.id, "todo", ""))
+        await service.update_status(task_id=task.id, owner_id="user-42", status="done")
+        replay = await service.create_task(owner_id="user-42", title="Отчёт", operation_id="legacy-op")
+        self.assertEqual((replay.id, replay.status), (task.id, "done"))
+        self.assertEqual(
+            [t.status for t in await self.repository.list(RecordQuery(owner_id="user-42"))], ["done"]
+        )
 
     async def test_concurrent_status_change_is_not_overwritten_silently(self) -> None:
         task = create_task(owner_id="user-42", title="Отчёт", created_at=CREATED_AT)

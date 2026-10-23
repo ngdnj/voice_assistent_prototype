@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from app.planner.fields import normalize_description
+from app.planner.fields import check_name_length, normalize_description
 from app.planner.time import to_utc
 
 
@@ -39,6 +39,7 @@ class Reminder:
 def create_reminder(
     *, owner_id: str, text: str, remind_at: datetime, created_at: datetime, description: str = ""
 ) -> Reminder:
+    check_name_length(text, "text")
     return Reminder(
         owner_id=owner_id, text=text, remind_at=remind_at, created_at=created_at,
         description=description,

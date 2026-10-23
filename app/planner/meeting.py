@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from app.planner.fields import normalize_description
+from app.planner.fields import check_name_length, normalize_description
 from app.planner.time import to_utc
 
 
@@ -41,6 +41,7 @@ def create_meeting(
     created_at: datetime, ends_at: datetime | None = None, description: str = "",
 ) -> Meeting:
     """Create a meeting with explicitly supplied start, optional end and creation time."""
+    check_name_length(title, "title")
     return Meeting(
         owner_id=owner_id, title=title, starts_at=starts_at,
         ends_at=ends_at, created_at=created_at, description=description,
