@@ -16,6 +16,7 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.1,<2.2",
     "asyncpg>=0.32,<0.33",
     "alembic>=1.20,<2",
+    "fastapi>=0.161,<0.162",
 ]
 
 [project.optional-dependencies]
@@ -77,4 +78,8 @@ files = [
     "app/llm", "app/asr", "app/config.py", "app/metrics.py", "evals",
     # Role 4
     "app/storage/postgres",
+    "app/mcp_server",
+    "app/api/records.py",
+    "app/api/init_data.py",
+    "migrations",
 ]

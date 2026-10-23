@@ -19,6 +19,20 @@ jobs:
           --health-interval 2s
           --health-timeout 2s
           --health-retries 15
+      # Role 4: dedicated test database for migrations, repositories, MCP and REST tests.
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: it_gorky_test
+          POSTGRES_USER: it_gorky
+          POSTGRES_PASSWORD: ci-only-password
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U it_gorky -d it_gorky_test"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
     env:
       RUN_REDIS_INTEGRATION: "1"
       REDIS_HOST: 127.0.0.1
@@ -26,6 +40,13 @@ jobs:
       REDIS_DB: "0"
       REDIS_USERNAME: ""
       REDIS_PASSWORD: ""
+      RUN_PG_INTEGRATION: "1"
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "5433"
+      POSTGRES_DB: it_gorky_test
+      POSTGRES_TEST_DB: it_gorky_test
+      POSTGRES_USER: it_gorky
+      POSTGRES_PASSWORD: ci-only-password
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
@@ -37,5 +58,7 @@ jobs:
       - run: uv run --locked ruff format --check .
       - run: uv run --locked mypy
       - run: uv run --locked mypy app/runtime.py app/__main__.py
+      - run: uv run --locked alembic upgrade head
+      - run: uv run --locked alembic check
       - run: uv run --locked pytest -q -W error::RuntimeWarning
       - run: uv run --locked python -m app check

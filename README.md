@@ -190,17 +190,58 @@ exactly-once доставку.
 
 ## Локальный PostgreSQL (роль 4)
 
-PostgreSQL станет постоянным хранилищем записей. Сейчас готова только
-инфраструктура: настройки, lifecycle engine и Compose; таблиц, миграций и
-репозиториев ещё нет, приложение продолжает работать через Redis.
+PostgreSQL станет постоянным хранилищем записей. Готовы настройки, lifecycle engine,
+Compose, схема, первая миграция и репозитории; `app/runtime.py` пока собирает
+сервисы на Redis — переключение на PostgreSQL решает роль 1.
 План и контракт роли 4: [app/mcp_server/mcp_realisation_plan.md](app/mcp_server/mcp_realisation_plan.md),
 [app/mcp_server/INTEGRATION.md](app/mcp_server/INTEGRATION.md).
 
 ```bash
 docker compose up -d --wait postgres
 uv run --locked --env-file .env python -m app.storage.postgres.engine   # «PostgreSQL доступен»
+uv run --locked --env-file .env alembic upgrade head                      # схема в POSTGRES_DB
 RUN_PG_INTEGRATION=1 uv run --locked --env-file .env pytest -q tests/storage_pg
 ```
+
+Схема — `app/storage/postgres/tables.py`, миграции — `migrations/` (Alembic, `alembic.ini` в корне,
+адрес БД берётся из `POSTGRES_*`, в ini пароля нет). Таблица `events` хранит задачи, встречи и
+напоминания: момент записи (`scheduled_at`: начало встречи, время напоминания, точный срок задачи),
+`due_date` для срока без времени, `ends_at`, статус только у задач и генерируемый `tsvector`
+(`russian`, название + описание) с GIN-индексом. Правила модели продублированы `CHECK`-ограничениями.
+Таблица `operations` — результат логического создания с ключом `(owner_id, operation_type, operation_id)`.
+Перед применением посмотреть SQL: `alembic upgrade head --sql`. Новая миграция — `alembic revision
+--autogenerate -m "..."` с обязательной ручной проверкой; применённые миграции не редактируются.
+Тесты миграций выполняют `downgrade base` и `upgrade head` только в `POSTGRES_TEST_DB`.
+
+Репозитории `PostgresTaskRepository`, `PostgresMeetingRepository`, `PostgresReminderRepository`
+(`app/storage/postgres/{tasks,meetings,reminders}.py`) реализуют те же протоколы planner, что и
+Redis-адаптеры, и подставляются в существующие сервисы без их изменения:
+
+```python
+from app.planner.service import TaskService
+from app.storage.postgres.engine import postgres_engine, session_factory
+from app.storage.postgres.settings import PostgresSettings
+from app.storage.postgres.tasks import PostgresTaskRepository
+
+
+async def pg_example(clock):
+    async with postgres_engine(PostgresSettings.from_env()) as engine:
+        service = TaskService(repository=PostgresTaskRepository(session_factory(engine)), clock=clock)
+        task = await service.create_task(owner_id="user-42", title="Отчёт", operation_id="example-5")
+        await service.update_status(task_id=task.id, owner_id="user-42", status="done")
+```
+
+- Каждый метод открывает свою `AsyncSession`. Создание записи и строки `operations` — одна
+  транзакция; параллельные повторы одной операции разрешает `INSERT … ON CONFLICT DO NOTHING`:
+  проигравший откатывает свою запись и возвращает запись победителя. Тот же `operation_id`
+  с другими данными — `OperationConflictError`. Повтор после смены статуса возвращает текущую задачу.
+- Все запросы фильтруют владельца и тип; чужая и отсутствующая запись — `None`.
+- Период `[start_time, end_time)` и порядок `(время, UUID)` — как у Redis: задачи по `created_at`,
+  встречи по началу, напоминания по времени напоминания.
+- `query` — PostgreSQL FTS (`websearch_to_tsquery('russian', …)`) по названию и описанию, с морфологией
+  («встречу» находит «Встреча»). В отличие от Redis, это не поиск подстроки: «отч» не найдёт «отчёт».
+  Лимита 1000 кандидатов нет — поиск идёт по GIN-индексу.
+- Ошибки драйвера и сети — `TaskStorageError`/`MeetingStorageError`/`ReminderStorageError` без деталей.
 
 Compose запускает `postgres:18-alpine` на `127.0.0.1:5433` (порт 5433 не конфликтует
 с локально установленным сервером на 5432) с именованным томом `postgres-data`:
@@ -217,6 +258,40 @@ Compose запускает `postgres:18-alpine` на `127.0.0.1:5433` (порт 
 async context manager на время жизни процесса: создаёт engine и pool, проверяет
 `SELECT 1`, закрывает pool при любом выходе. `session_factory(engine)` выдаёт
 по одной `AsyncSession` на операцию. Импорт модулей не подключается к БД.
+
+## MCP server (роль 4)
+
+Три инструмента для агента — `create_event`, `get_events_by_period`, `get_event_by_query` — на
+FastMCP поверх тех же сервисов planner и PostgreSQL-репозиториев. Контракт для ролей 1, 3 и 5,
+заголовки и примеры: [app/mcp_server/INTEGRATION.md](app/mcp_server/INTEGRATION.md).
+
+```bash
+docker compose up -d --wait postgres
+uv run --locked --env-file .env alembic upgrade head
+# MCP_SERVICE_TOKEN в .env — не меньше 32 символов, общий с agent worker
+uv run --locked --env-file .env python -m app.mcp_server     # http://127.0.0.1:8001/mcp
+RUN_PG_INTEGRATION=1 uv run --locked --env-file .env pytest -q tests/mcp_server
+```
+
+Владелец, часовой пояс и идентификатор действия приходят в заголовках от agent worker
+(`Authorization: Bearer`, `X-Owner-Id`, `X-Timezone`, `X-Action-Id`), а не из аргументов модели.
+Ошибки возвращаются в результате инструмента: `{"error": {"code", "message", "field"}}`;
+пустая выдача — `{"events": []}`. Пока роль 1 не решила, где монтировать MCP в общем API,
+сервер работает отдельным процессом (вместе с REST Mini App); по `SIGINT`/`SIGTERM` uvicorn
+завершает текущие запросы.
+
+## REST для MAX Mini App (роль 4)
+
+Тот же процесс `python -m app.mcp_server` отдаёт `/api/events` (период и вкладки), `/api/events/search`
+и `PATCH /api/tasks/{id}/status`, если задан `MAX_BOT_TOKEN`. Каждый запрос несёт исходную `initData`
+в заголовке `X-Max-Init-Data`; сервер проверяет подпись по алгоритму MAX и свежесть (сутки), владелец —
+`str(user.id)` из проверенных данных. Ответы и ошибки — в формате MCP, см. раздел 4
+[INTEGRATION.md](app/mcp_server/INTEGRATION.md). Тесты: `RUN_PG_INTEGRATION=1 ... pytest -q tests/api_records`.
+
+Метрики роли 4 (`assistant_record_operations_total`, `assistant_record_operation_seconds`, метки
+operation/transport/outcome без пользовательских данных) отдаются этим процессом на `/metrics/`.
+CI (`.github/workflows/backend.yml`) поднимает отдельный PostgreSQL `it_gorky_test`, применяет миграции,
+выполняет `alembic check` и интеграционные тесты с `RUN_PG_INTEGRATION=1`.
 
 ## Задачи в Redis: временное хранилище прототипа
 
@@ -394,7 +469,8 @@ compare-and-set (Lua): если запись изменилась между ч�
 ## Идемпотентность создания
 
 Сервисы создания задач, встреч и напоминаний требуют `operation_id` от адаптера.
-Область уникальности: владелец + тип операции + operation_id. Те же
+Область уникальности в Redis: владелец + тип операции + operation_id (в PostgreSQL —
+владелец + operation_id: тот же идентификатор для записи другого типа — конфликт). Те же
 нормализованные данные возвращают первоначальные UUID и created_at,
 другие — `OperationConflictError`. Запись, индекс и JSON результата сохраняются
 одним Lua-вызовом Redis. TTL у истории операций нет: автоматическое истечение
