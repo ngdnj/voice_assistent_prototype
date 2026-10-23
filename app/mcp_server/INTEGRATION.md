@@ -4,7 +4,28 @@
 > REST для Mini App (раздел 4) реализован в том же процессе. Изменения — только через журнал версий внизу.
 
 Документ для разработчиков и их агентов: ролей 1 (agent runner, MCP client), 3 (промпт, схемы tools),
-5 (Mini App). Внутреннее устройство роли 4 здесь не описано, см. [`mcp_realisation_plan.md`](mcp_realisation_plan.md).
+5 (Mini App). Внутреннее устройство роли 4 здесь не описано, см. [`MCP_REALISATION_PLAN.md`](MCP_REALISATION_PLAN.md).
+
+## 0. Что сделать каждой роли
+
+| Роль | Что нужно сделать для интеграции | Раздел |
+| --- | --- | --- |
+| 1 | Передавать заголовки доверенного контекста, один `action_id` на действие; решить, где монтировать MCP/REST; перевести runtime на PostgreSQL | 3, «Запуск» |
+| 2 | Класть в `X-Owner-Id` строку с числовым id пользователя MAX (`str(user.id)`); дать `MAX_BOT_TOKEN` для проверки `initData` | 4 |
+| 3 | Сверить схемы tools и промпт с разделом 3 (ошибки-объекты, нет `already_exists`, `end_time`, выборка задач по сроку) | 3 |
+| 5 | Ходить в `/api/*` с заголовком `X-Max-Init-Data`, передавать `timezone`, обрабатывать 401/404/422/503 | 4 |
+| 6 | Строить панели по метрикам из раздела 5 | 5 |
+
+### Запуск локально
+
+```bash
+docker compose up -d --wait postgres
+uv run --locked --env-file .env alembic upgrade head
+uv run --locked --env-file .env python -m app.mcp_server   # MCP: /mcp, REST: /api/*, метрики: /metrics/
+```
+
+Переменные — в `.env.example`: `POSTGRES_*`, `MCP_SERVICE_TOKEN` (≥ 32 символов), `MCP_HOST`, `MCP_PORT`,
+`MCP_PATH`, `MAX_BOT_TOKEN` (включает REST), `MINI_APP_ORIGINS` (CORS).
 
 ## 1. Общие правила
 
@@ -213,6 +234,30 @@ REST включается, только если задан `MAX_BOT_TOKEN` (т�
 CORS: разрешённые origin Mini App задаются `MINI_APP_ORIGINS` (через запятую); без него CORS выключен.
 Процесс также отдаёт `/metrics/` и `/mcp`: при публикации через reverse proxy наружу открывать только `/api/`.
 
+Пример запроса из Mini App:
+
+```ts
+const response = await fetch(`${API_URL}/api/events?` + new URLSearchParams({
+  start_time: "2026-10-24T00:00:00+03:00",
+  end_time: "2026-10-25T00:00:00+03:00",
+  timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+}), { headers: { "X-Max-Init-Data": window.WebApp.initData } });
+if (response.status === 401) { /* попросить открыть приложение из MAX заново */ }
+const body = await response.json(); // {"events": [...], "truncated": false} или {"error": {...}}
+```
+
+## 5. Метрики (роль 6)
+
+`GET /metrics/` в формате Prometheus. Метки — только перечисления, без пользователей и текстов.
+
+| Метрика | Тип | Метки |
+| --- | --- | --- |
+| `assistant_record_operations_total` | counter | `operation` (`create_event`, `get_events_by_period`, `get_event_by_query`, `update_task_status`), `transport` (`mcp`, `rest`), `outcome` (`ok` или код ошибки; `exception` — непредвиденная ошибка) |
+| `assistant_record_operation_seconds` | histogram | `operation`, `transport` |
+
+Примеры: доля ошибок хранилища — `sum(rate(assistant_record_operations_total{outcome="temporary_unavailable"}[5m]))`;
+p95 длительности — `histogram_quantile(0.95, sum by (le, operation) (rate(assistant_record_operation_seconds_bucket[5m])))`.
+
 ## Журнал версий
 
 | Версия | Дата | Изменение |
@@ -221,3 +266,4 @@ CORS: разрешённые origin Mini App задаются `MINI_APP_ORIGINS`
 | v1 | 2026-10-23 | MCP реализован. Добавлен обязательный `X-Timezone`; убран флаг `replayed`; порядок поиска — по времени; описана выборка задач по сроку |
 | v2 | 2026-10-23 | REST для Mini App реализован: заголовок `X-Max-Init-Data`, свежесть сутки, `timezone` в запросе, ответ PATCH — `{"event": ...}`, владелец — `str(user.id)` |
 | v3 | 2026-10-23 | По итогам проверки: `action_id` уникален для владельца независимо от типа записи; ошибки схемы — структурированные; `date` строго `YYYY-MM-DD`; NUL в тексте — `validation_error`; уточнён порядок поиска |
+| v3.1 | 2026-10-23 | Без изменения контракта: задачи по ролям, локальный запуск, пример запроса Mini App, метрики для роли 6 |

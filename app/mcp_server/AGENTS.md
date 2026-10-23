@@ -5,7 +5,7 @@
 Общение и документация на русском, имена в коде и API на английском.
 
 Перед работой прочитай:
-- [`mcp_realisation_plan.md`](mcp_realisation_plan.md): текущий блок, принятые решения, открытые вопросы;
+- [`MCP_REALISATION_PLAN.md`](MCP_REALISATION_PLAN.md): текущий блок, принятые решения, открытые вопросы;
 - [`INTEGRATION.md`](INTEGRATION.md): опубликованный контракт для ролей 1, 3, 5;
 - корневой `AGENTS.md` §4, §7–§9, §11 (Mini App), §13–§14;
 - `docs/backend-contracts.md` (ошибки, доверенный контекст), `docs/record-queries.md`, `docs/idempotency.md`.
@@ -117,7 +117,7 @@ RUN_PG_INTEGRATION=1 uv run --locked --env-file .env pytest -q tests/mcp_server 
 
 Изменилось имя или схема инструмента, DTO, маршрут REST или формат ошибки? Тогда в одном блоке:
 1. обнови `INTEGRATION.md`, подними версию и допиши журнал;
-2. обнови `mcp_realisation_plan.md` (решения и журнал архитектуры);
+2. обнови `MCP_REALISATION_PLAN.md` (решения и журнал архитектуры);
 3. в отчёте перечисли, что должны сделать роли 1, 3, 5.
 
 Изменилась архитектура? Сначала обнови план, потом код.

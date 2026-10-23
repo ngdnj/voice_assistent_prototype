@@ -272,7 +272,7 @@ AGENTS §15: каждый владелец добавляет показател
 
 | Дата | Изменение | Файлы |
 | --- | --- | --- |
-| 2026-10-23 | Созданы правила роли 4, план и черновик контракта v0; локальный субагент `mcp-tester` | `app/mcp_server/{AGENTS,mcp_realisation_plan,INTEGRATION}.md`, `.claude/agents/mcp-tester.md` |
+| 2026-10-23 | Созданы правила роли 4, план и черновик контракта v0; локальный субагент `mcp-tester` | `app/mcp_server/{AGENTS,MCP_REALISATION_PLAN,INTEGRATION}.md`, `.claude/agents/mcp-tester.md` |
 | 2026-10-23 | B0.1: статусы задачи `todo/in_progress/done`; Redis-адаптер задач читает их и legacy `active`; README и `docs/backend-contracts.md` обновлены | `app/planner/task.py`, `app/storage/redis_tasks.py`, `tests/test_task*.py`, `tests/test_redis_tasks.py`, `README.md`, `docs/backend-contracts.md` |
 | 2026-10-23 | B0.2: `description` у трёх типов, отпечаток операций совместим со старыми; Redis-адаптеры читают записи без поля | `app/planner/{fields,task,meeting,reminder,service,meeting_service,reminder_service}.py`, `app/storage/redis_{tasks,meetings,reminders}.py`, `tests/test_description.py`, `tests/test_redis_*.py`, `tests/test_reminder.py`, `README.md` |
 | 2026-10-23 | B0.3: срок задачи `due_date` XOR `due_at`; Q4 закрыт; Redis-адаптер задач хранит срок | `app/planner/{task,service}.py`, `app/storage/redis_tasks.py`, `tests/test_task_due.py`, `tests/test_redis_tasks.py`, `README.md`, `docs/{backend-contracts,record-queries}.md` |
@@ -287,3 +287,4 @@ AGENTS §15: каждый владелец добавляет показател
 | 2026-10-23 | B5: REST Mini App + initData; MCP и REST в одном процессе; INTEGRATION v2; 232 passed | `app/api/{init_data,records}.py`, `app/mcp_server/{__main__,tools}.py`, `tests/api_records/`, `pyproject.toml`, `uv.lock`, `.env.example`, `README.md` |
 | 2026-10-23 | B6 (своя часть): CI с PostgreSQL; B7: метрики роли 4 и `/metrics/`; список задач для других ролей | `.github/workflows/backend.yml`, `app/mcp_server/{metrics,server,__main__}.py`, `app/api/records.py`, `tests/mcp_server/test_metrics.py`, план |
 | 2026-10-23 | Исправлены 8 дефектов проверки; D6 изменён (PK `operations` без типа); INTEGRATION v3; 253 passed | `app/storage/postgres/{tables,records}.py`, `migrations/versions/0001_*.py`, `app/mcp_server/{server,tools,schemas}.py`, `app/planner/query.py`, `app/api/records.py`, `tests/*/test_edge_cases.py`, `tests/storage_pg/test_repositories.py` |
+| 2026-10-23 | План переименован в `MCP_REALISATION_PLAN.md`; INTEGRATION v3.1: задачи по ролям, запуск, пример Mini App, метрики | `app/mcp_server/{MCP_REALISATION_PLAN,INTEGRATION,AGENTS}.md`, `README.md` |

@@ -193,7 +193,7 @@ exactly-once доставку.
 PostgreSQL станет постоянным хранилищем записей. Готовы настройки, lifecycle engine,
 Compose, схема, первая миграция и репозитории; `app/runtime.py` пока собирает
 сервисы на Redis — переключение на PostgreSQL решает роль 1.
-План и контракт роли 4: [app/mcp_server/mcp_realisation_plan.md](app/mcp_server/mcp_realisation_plan.md),
+План и контракт роли 4: [app/mcp_server/MCP_REALISATION_PLAN.md](app/mcp_server/MCP_REALISATION_PLAN.md),
 [app/mcp_server/INTEGRATION.md](app/mcp_server/INTEGRATION.md).
 
 ```bash
