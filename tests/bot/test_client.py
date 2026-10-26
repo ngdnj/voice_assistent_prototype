@@ -319,3 +319,46 @@ def test_webhook_secret_format() -> None:
     for secret in ("abc", "with space", "кириллица1", "a" * 257):
         with pytest.raises(ValueError):
             settings(webhook_secret=secret)
+
+
+async def test_buttons_delete_and_answer_requests() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.method == "POST" and request.url.path == "/messages":
+            return httpx.Response(200, json={"message": {"body": {"mid": "mid.7"}}})
+        return httpx.Response(200, json={"success": True})
+
+    max_client = MaxClient(settings(), transport=httpx.MockTransport(handler))
+    result = await max_client.send_text(chat_id="1", text="Все верно?", buttons=(("Да", "confirm:yes"),))
+    assert result.external_message_id == "mid.7"
+    assert json.loads(seen[0].content) == {
+        "text": "Все верно?",
+        "attachments": [
+            {
+                "type": "inline_keyboard",
+                "payload": {"buttons": [[{"type": "callback", "text": "Да", "payload": "confirm:yes"}]]},
+            }
+        ],
+    }
+    assert await max_client.delete_message(message_id="mid.7") == ""
+    assert (seen[1].method, seen[1].url.path, seen[1].url.params["message_id"]) == (
+        "DELETE",
+        "/messages",
+        "mid.7",
+    )
+    assert await max_client.answer_callback(callback_id="cb.1") == ""
+    assert (seen[2].method, seen[2].url.path, seen[2].url.params["callback_id"]) == (
+        "POST",
+        "/answers",
+        "cb.1",
+    )
+    await max_client.aclose()
+
+
+async def test_refused_delete_is_reported() -> None:
+    response = httpx.Response(200, json={"success": False, "message": "no rights"})
+    max_client = MaxClient(settings(), transport=httpx.MockTransport(lambda request: response))
+    assert await max_client.delete_message(message_id="m") == "rejected"
+    await max_client.aclose()

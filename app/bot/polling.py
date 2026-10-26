@@ -12,7 +12,7 @@ from app.bot.client import MaxClient, PollingError
 from app.bot.service import BotService, log_event
 from app.bot.updates import InvalidUpdateError, parse_update
 
-UPDATE_TYPES = ("bot_started", "message_created")
+UPDATE_TYPES = ("bot_started", "message_created", "message_callback")
 RETRY_DELAY_S = 5.0
 
 

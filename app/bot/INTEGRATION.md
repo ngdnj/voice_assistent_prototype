@@ -28,7 +28,7 @@ bot_started или /start ─▶ приветствие
 сообщение ─▶ дедупликация события ─▶ занято? ─да─▶ «Сейчас обрабатывается ваш предыдущий запрос…»
                                          └нет─▶ блокировка ─▶ «Принял запрос, обрабатываю…» ─▶ фоновая обработка
 фоновая обработка: текст ─────────────────────────────────▶ Backend.answer ─▶ ответ пользователю
-                   голос ─▶ загрузка ─▶ ASR ─▶ «Распознано: …» ─▶ Backend.answer ─▶ ответ пользователю
+                   голос ─▶ загрузка ─▶ ASR ─────────────────▶ Backend.answer ─▶ ответ пользователю
                    в любом исходе ─▶ снятие блокировки
 ```
 
@@ -41,6 +41,12 @@ bot_started или /start ─▶ приветствие
 - Владелец — `owner_id = str(sender.user_id)`, ответ уходит в `recipient.chat_id`. Сообщения ботов
   и записи каналов без отправителя игнорируются.
 - Подтверждение создания формирует backend по результату инструмента; бот отправляет его текст как есть.
+- Ответ backend может быть `Reply(text, buttons)`: кнопки-callback в одну строку под последним сообщением.
+  Сейчас демо-backend отвечает «Вы сказали: …\nВсе верно?» с кнопками «Да, все верно» (`confirm:yes`,
+  пока без действия, нажатие только подтверждается через `POST /answers`) и «Нет» (`confirm:no` →
+  «Повторите запрос.», следующее сообщение — обычный новый запрос).
+- Сообщение «Принял запрос, обрабатываю…» удаляется (`DELETE /messages`) после отправки ответа или ошибки.
+  Отдельного сообщения «Распознано: …» больше нет.
   Ошибка или пустой ответ backend — честное «Не получилось обработать запрос…».
 
 ## 2. Модули
@@ -161,6 +167,7 @@ MAX_BOT_TOKEN=<токен тестового бота> uv run --locked --env-fil
 uv run --locked --env-file .env python -m app.bot webhook            # 127.0.0.1:8080, POST /max/webhook, GET /health
 uv run --locked --env-file .env python -m app.bot subscribe --url https://<туннель>/max/webhook
 uv run --locked --env-file .env python -m app.bot subscriptions      # список подписанных URL
+uv run --locked --env-file .env python -m app.bot doctor             # проверка цепочки по шагам: секрет, Redis, токен, подписка, сервер, туннель, пробное событие
 uv run --locked --env-file .env python -m app.bot unsubscribe --url https://<туннель>/max/webhook
 ```
 
@@ -196,7 +203,7 @@ uv run --locked --env-file .env python -m app.bot unsubscribe --url https://<т�
 | `MAX_CA_BUNDLE_FILE` | пусто | дополнительный PEM-сертификат к публичным УЦ (сертификат Минцифры, если MAX его использует) |
 | `MAX_WEBHOOK_SECRET` | пусто | 5–256 символов `[A-Za-z0-9_-]`; обязателен для webhook |
 | `MAX_DEFAULT_TIMEZONE` | `Europe/Moscow` | явная настройка продукта, пока зона не хранится в профиле |
-| `MAX_AUDIO_HOSTS` | `max.ru` | суффиксы хостов для загрузки аудио, через запятую |
+| `MAX_AUDIO_HOSTS` | `max.ru,oneme.ru` | суффиксы хостов для загрузки аудио, через запятую |
 | `MAX_AUDIO_MAX_BYTES` | `10485760` | лимит размера аудио |
 | `MAX_SEND_TIMEOUT_S` | `10` | таймаут одного HTTP-вызова MAX, ≤ 20 |
 | `BOT_PROCESSING_TIMEOUT_S` | `120` | предел ASR + backend на один запрос |
@@ -249,3 +256,7 @@ uv run --locked --env-file .env python -m app.bot unsubscribe --url https://<т�
 | v1.2 | 2026-10-26 | Без изменения контракта: причина в логе `polling_failed` (`error_code`: `http_401`, `tls_certificate`, `connect_error`, `proxy_error`, `timeout`…), `MAX_CA_BUNDLE_FILE` |
 | v1.3 | 2026-10-26 | Без изменения контракта `Backend`: только смайлики → «Введите корректный запрос.»; аудиофайлы `file`; расшифровка MAX как запасной вариант; пустые `message_created` логируются; причина невалидного события в логе; проверка ASR при старте |
 | v1.4 | 2026-10-26 | Локальный webhook-режим `python -m app.bot webhook`, команды `subscribe` / `unsubscribe` / `subscriptions`, проверка формата `MAX_WEBHOOK_SECRET`, корректная остановка по сигналу в обоих режимах |
+| v1.5 | 2026-10-26 | Команда `doctor` для диагностики webhook-цепочки; лог `webhook_received`; расширенные причины ошибок аудио и ASR |
+| v1.6 | 2026-10-26 | Выбран GigaAM: `python -m app.bot` загружает модель в фоне при старте (`asr_warm_up_started` / `_finished` / `_failed`); запуск с `--extra asr` |
+| v1.7 | 2026-10-26 | По реальному событию: голосовые MAX отдаёт с `a.oneme.ru`, домен `oneme.ru` разрешён по умолчанию |
+| v1.8 | 2026-10-26 | `Backend.answer` возвращает `str` или `Reply(text, buttons)`; статус «Принял запрос…» удаляется после ответа; сообщение «Распознано» убрано; кнопки-callback «Да, все верно» / «Нет» (`confirm:yes` / `confirm:no`), событие `message_callback` (нужна переподписка), «Нет» → «Повторите запрос.» |

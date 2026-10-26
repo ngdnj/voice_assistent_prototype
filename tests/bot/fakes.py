@@ -14,11 +14,25 @@ NOW = datetime(2026, 10, 25, 9, 30, tzinfo=UTC)
 class FakeSender:
     def __init__(self) -> None:
         self.sent: list[tuple[str, str]] = []
-        self.result = SendResult("delivered", external_message_id="mid.1")
+        self.buttons: list[tuple[tuple[str, str], ...]] = []
+        self.deleted: list[str] = []
+        self.answered: list[str] = []
+        self.result = SendResult("delivered", external_message_id="mid.status")
 
-    async def send_text(self, *, chat_id: str, text: str) -> SendResult:
+    async def send_text(
+        self, *, chat_id: str, text: str, buttons: tuple[tuple[str, str], ...] = ()
+    ) -> SendResult:
         self.sent.append((chat_id, text))
+        self.buttons.append(buttons)
         return self.result
+
+    async def delete_message(self, *, message_id: str) -> str:
+        self.deleted.append(message_id)
+        return ""
+
+    async def answer_callback(self, *, callback_id: str) -> str:
+        self.answered.append(callback_id)
+        return ""
 
     @property
     def texts(self) -> list[str]:

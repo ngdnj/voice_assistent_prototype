@@ -53,7 +53,17 @@ class Ignored:
     reason: str = ""
 
 
-BotEvent = BotStarted | MessageCreated | Ignored
+@dataclass(frozen=True, kw_only=True)
+class CallbackPressed:
+    """A callback button was pressed (update_type `message_callback`)."""
+
+    callback_id: str
+    payload: str
+    owner_id: str
+    chat_id: str | None  # from the message with the keyboard; None if MAX did not include it
+
+
+BotEvent = BotStarted | MessageCreated | CallbackPressed | Ignored
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -128,6 +138,24 @@ def _audio(attachments: object) -> AudioRef | None:
     return None
 
 
+def _callback(update: dict[str, object]) -> CallbackPressed:
+    callback = _object(update.get("callback"), "callback")
+    callback_id = _id(callback.get("callback_id"), "callback_id")
+    payload = callback.get("payload")
+    owner_id = _id(_object(callback.get("user"), "callback user").get("user_id"), "user_id")
+    chat_id: str | None = None
+    message = update.get("message")
+    if isinstance(message, dict) and isinstance(message.get("recipient"), dict):
+        raw_chat = message["recipient"].get("chat_id")
+        chat_id = _id(raw_chat, "chat_id") if raw_chat is not None else None
+    return CallbackPressed(
+        callback_id=callback_id,
+        payload=payload if isinstance(payload, str) else "",
+        owner_id=owner_id,
+        chat_id=chat_id,
+    )
+
+
 def has_meaningful_text(text: str) -> bool:
     """True if the text has a letter or digit: emoji, punctuation and spaces alone are not a request."""
     return any(char.isalnum() for char in text)
@@ -151,6 +179,8 @@ def parse_update(raw: object) -> BotEvent:
             chat_id=chat_id,
             owner_id=_id(user.get("user_id"), "user_id"),
         )
+    if update_type == "message_callback":
+        return _callback(update)
     if update_type != "message_created":
         return Ignored(update_type=update_type)
 

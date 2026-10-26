@@ -5,6 +5,7 @@
     python -m app.bot subscribe --url https://<host>/max/webhook
     python -m app.bot unsubscribe --url https://<host>/max/webhook
     python -m app.bot subscriptions        # list subscribed URLs
+    python -m app.bot doctor               # check the webhook chain step by step
 
 This is a development entry point, not a new production process: in the target
 architecture the webhook router is mounted into the API (INTEGRATION.md §3).
@@ -28,10 +29,18 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from app.asr.base import SpeechRecognizer
+from app.bot import messages
 from app.bot.client import MaxClient, SubscriptionError
 from app.bot.gate import RedisGate
 from app.bot.polling import UPDATE_TYPES, run_polling
-from app.bot.service import BackendRequest, BackgroundRunner, BotService, log_event
+from app.bot.service import (
+    CONFIRM_BUTTONS,
+    BackendRequest,
+    BackgroundRunner,
+    BotService,
+    Reply,
+    log_event,
+)
 from app.bot.settings import BotSettings
 from app.bot.webhook import build_webhook_app
 from app.storage.redis import RedisSettings, redis_connection
@@ -48,9 +57,10 @@ class DemoBackend:
     def __init__(self, delay_s: float) -> None:
         self._delay_s = delay_s
 
-    async def answer(self, request: BackendRequest) -> str:
+    async def answer(self, request: BackendRequest) -> Reply:
         await asyncio.sleep(self._delay_s)
-        return f"Демо-режим: обработчик запросов ещё не подключён. Получен запрос: «{request.text}»"
+        # Echo for checking text and voice recognition; "yes" has no action until the agent is wired.
+        return Reply(messages.YOU_SAID.format(text=request.text), CONFIRM_BUTTONS)
 
 
 def build_recognizer() -> SpeechRecognizer | None:
@@ -139,6 +149,28 @@ async def run_webhook_server(app: FastAPI, *, host: str, port: int, stop: asynci
         watcher.cancel()
 
 
+def start_warm_up(recognizer: SpeechRecognizer | None) -> asyncio.Task[None] | None:
+    """Load a local model (GigaAM) in the background, so the first voice message is not slowed down.
+
+    Text keeps working meanwhile; a voice message that arrives during loading waits for it.
+    """
+    warm_up = getattr(recognizer, "warm_up", None)
+    if not callable(warm_up):
+        return None
+
+    async def run() -> None:
+        log_event("asr_warm_up_started")
+        try:
+            await asyncio.to_thread(warm_up)
+        except Exception:
+            # Typically no network for the first model download; the first voice message retries it.
+            log_event("asr_warm_up_failed")
+        else:
+            log_event("asr_warm_up_finished")
+
+    return asyncio.create_task(run())
+
+
 async def serve(mode: str, args: argparse.Namespace) -> int:
     """Run the bot in polling or webhook mode with one Redis pool and one MAX client."""
     settings = BotSettings.from_env()
@@ -148,6 +180,7 @@ async def serve(mode: str, args: argparse.Namespace) -> int:
     recognizer = build_recognizer()
     client = MaxClient(settings)
     runner = BackgroundRunner(max_concurrency=settings.max_concurrency)
+    warm_up = start_warm_up(recognizer)
     try:
         async with redis_connection(RedisSettings.from_env()) as redis:
             bot = build_bot(settings, redis=redis, client=client, runner=runner, recognizer=recognizer)
@@ -165,6 +198,9 @@ async def serve(mode: str, args: argparse.Namespace) -> int:
         log_event("redis_unavailable")
         return 1
     finally:
+        if warm_up is not None and not warm_up.done():
+            # The loading thread cannot be interrupted; the process exits without waiting for it.
+            warm_up.cancel()
         await client.aclose()
         if recognizer is not None:
             await recognizer.aclose()
@@ -208,6 +244,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         command = commands.add_parser(name, help=text)
         command.add_argument("--url", required=True, help="https://<host>/max/webhook")
     commands.add_parser("subscriptions", help="показать текущие подписки")
+    doctor = commands.add_parser("doctor", help="проверить всю цепочку webhook по шагам")
+    doctor.add_argument("--url", default=None, help="https://<host>/max/webhook (по умолчанию — из подписки)")
+    doctor.add_argument("--port", type=int, default=8080, help="порт локального сервера бота")
     args = parser.parse_args(argv)
     if args.command is None:
         args.command = "polling"
@@ -218,11 +257,30 @@ async def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.command in ("polling", "webhook"):
         return await serve(args.command, args)
+    if args.command == "doctor":
+        return await diagnose(args)
     return await manage_subscriptions(args.command, args)
+
+
+async def diagnose(args: argparse.Namespace) -> int:
+    import httpx
+
+    from app.bot.doctor import run_doctor
+
+    settings = BotSettings.from_env()
+    client = MaxClient(settings)
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as http:
+            ok = await run_doctor(settings, url=args.url, local_port=args.port, client=client, http=http)
+    finally:
+        await client.aclose()
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    # httpx logs every request URL at INFO; media URLs may carry access tokens, chat ids are personal.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     try:
         raise SystemExit(asyncio.run(main()))
     except KeyboardInterrupt:

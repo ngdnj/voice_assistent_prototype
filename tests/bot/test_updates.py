@@ -5,6 +5,7 @@ import pytest
 from app.bot.updates import (
     AudioRef,
     BotStarted,
+    CallbackPressed,
     Ignored,
     InvalidUpdateError,
     MessageCreated,
@@ -153,3 +154,24 @@ def test_audio_attachments(attachment: dict[str, object], expected: AudioRef | N
 )
 def test_has_meaningful_text(text: str, meaningful: bool) -> None:
     assert has_meaningful_text(text) is meaningful
+
+
+def test_message_callback() -> None:
+    raw = {
+        "update_type": "message_callback",
+        "timestamp": 3,
+        "callback": {"timestamp": 3, "callback_id": "cb.1", "payload": "confirm:no", "user": {"user_id": 42}},
+        "message": {"recipient": {"chat_id": 777}, "body": {"mid": "mid.9", "text": "Вы сказали"}},
+    }
+    assert parse_update(raw) == CallbackPressed(
+        callback_id="cb.1", payload="confirm:no", owner_id="42", chat_id="777"
+    )
+    del raw["message"]
+    assert parse_update(raw) == CallbackPressed(
+        callback_id="cb.1", payload="confirm:no", owner_id="42", chat_id=None
+    )
+
+
+def test_invalid_callback() -> None:
+    with pytest.raises(InvalidUpdateError):
+        parse_update({"update_type": "message_callback", "callback": {"payload": "x"}})
