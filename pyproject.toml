@@ -82,4 +82,6 @@ files = [
     "app/api/records.py",
     "app/api/init_data.py",
     "migrations",
+    # Role 2
+    "app/bot",
 ]

@@ -1,0 +1,232 @@
+"""Local run of the bot: long polling (default) or webhook, plus webhook subscription commands.
+
+    python -m app.bot                      # long polling
+    python -m app.bot webhook              # local HTTP server for MAX webhooks (behind an HTTPS tunnel)
+    python -m app.bot subscribe --url https://<host>/max/webhook
+    python -m app.bot unsubscribe --url https://<host>/max/webhook
+    python -m app.bot subscriptions        # list subscribed URLs
+
+This is a development entry point, not a new production process: in the target
+architecture the webhook router is mounted into the API (INTEGRATION.md §3).
+The agent runner of role 1 is not in `main` yet, so the backend here is an explicit
+demonstration stub that only echoes the request; it does not create records.
+"""
+
+import argparse
+import asyncio
+import contextlib
+import importlib.util
+import logging
+import os
+import shutil
+import signal
+from collections.abc import Iterator
+from datetime import UTC, datetime
+
+from fastapi import FastAPI
+from redis.asyncio import Redis
+from redis.exceptions import RedisError
+
+from app.asr.base import SpeechRecognizer
+from app.bot.client import MaxClient, SubscriptionError
+from app.bot.gate import RedisGate
+from app.bot.polling import UPDATE_TYPES, run_polling
+from app.bot.service import BackendRequest, BackgroundRunner, BotService, log_event
+from app.bot.settings import BotSettings
+from app.bot.webhook import build_webhook_app
+from app.storage.redis import RedisSettings, redis_connection
+
+SHUTDOWN_TIMEOUT_S = 10.0
+
+
+class DemoBackend:
+    """Stub until the agent runner is connected; says so to the user instead of faking success.
+
+    BOT_DEMO_DELAY_S imitates a slow backend, so the "busy" answer can be checked by hand.
+    """
+
+    def __init__(self, delay_s: float) -> None:
+        self._delay_s = delay_s
+
+    async def answer(self, request: BackendRequest) -> str:
+        await asyncio.sleep(self._delay_s)
+        return f"Демо-режим: обработчик запросов ещё не подключён. Получен запрос: «{request.text}»"
+
+
+def build_recognizer() -> SpeechRecognizer | None:
+    """Our ASR if it can actually run; otherwise None (voice then uses MAX transcription or a refusal)."""
+    try:
+        from app.asr.factory import build_recognizer as build
+        from app.config import get_settings
+
+        settings = get_settings()
+        # Both backends decode audio with ffmpeg; GigaAM also needs `uv sync --extra asr`.
+        if shutil.which("ffmpeg") is None:
+            log_event("asr_unavailable", backend=settings.asr_backend, reason="ffmpeg_not_found")
+            return None
+        if settings.asr_backend == "gigaam" and importlib.util.find_spec("gigaam") is None:
+            log_event("asr_unavailable", backend="gigaam", reason="gigaam_not_installed")
+            return None
+        recognizer = build(settings)
+    except Exception:
+        # Voice then gets a polite refusal; text keeps working.
+        log_event("asr_unavailable", reason="configuration_error")
+        return None
+    log_event("asr_ready", backend=settings.asr_backend)
+    return recognizer
+
+
+def demo_delay(settings: BotSettings) -> float:
+    delay_s = float(os.environ.get("BOT_DEMO_DELAY_S", "0"))
+    if not 0 <= delay_s < settings.processing_timeout_s:
+        raise ValueError("BOT_DEMO_DELAY_S must be between 0 and BOT_PROCESSING_TIMEOUT_S")
+    return delay_s
+
+
+def build_bot(
+    settings: BotSettings,
+    *,
+    redis: Redis,
+    client: MaxClient,
+    runner: BackgroundRunner,
+    recognizer: SpeechRecognizer | None,
+) -> BotService:
+    return BotService(
+        sender=client,
+        gate=RedisGate(redis, prefix=settings.key_prefix, busy_ttl_s=settings.busy_ttl_s),
+        backend=DemoBackend(demo_delay(settings)),
+        submit=runner.submit,
+        audio=client,
+        recognizer=recognizer,
+        timezone=settings.default_timezone,
+        processing_timeout_s=settings.processing_timeout_s,
+        clock=lambda: datetime.now(UTC),
+    )
+
+
+def install_stop(stop: asyncio.Event) -> None:
+    """Ctrl+C / SIGTERM set `stop`, so both modes drain active requests and release locks."""
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except NotImplementedError:
+            # Windows event loops have no add_signal_handler; a plain handler works there.
+            signal.signal(sig, lambda *_: loop.call_soon_threadsafe(stop.set))
+
+
+async def run_webhook_server(app: FastAPI, *, host: str, port: int, stop: asyncio.Event) -> None:
+    import uvicorn
+
+    class Server(uvicorn.Server):
+        @contextlib.contextmanager
+        def capture_signals(self) -> Iterator[None]:
+            # uvicorn would re-raise the signal after shutdown and kill the process before the
+            # bot drains its work; install_stop handles signals instead.
+            yield
+
+    # Access logs are off: request lines are not needed and the bot logs its own events.
+    server = Server(uvicorn.Config(app, host=host, port=port, log_level="warning", access_log=False))
+
+    async def stop_on_signal() -> None:
+        await stop.wait()
+        server.should_exit = True
+
+    watcher = asyncio.create_task(stop_on_signal())
+    try:
+        await server.serve()
+    finally:
+        watcher.cancel()
+
+
+async def serve(mode: str, args: argparse.Namespace) -> int:
+    """Run the bot in polling or webhook mode with one Redis pool and one MAX client."""
+    settings = BotSettings.from_env()
+    demo_delay(settings)  # Fail on bad settings before connecting anywhere.
+    if mode == "webhook" and not settings.webhook_secret:
+        raise ValueError("MAX_WEBHOOK_SECRET is required for the webhook mode")
+    recognizer = build_recognizer()
+    client = MaxClient(settings)
+    runner = BackgroundRunner(max_concurrency=settings.max_concurrency)
+    try:
+        async with redis_connection(RedisSettings.from_env()) as redis:
+            bot = build_bot(settings, redis=redis, client=client, runner=runner, recognizer=recognizer)
+            stop = asyncio.Event()
+            install_stop(stop)
+            if mode == "webhook":
+                app = build_webhook_app(bot, secret=settings.webhook_secret, path=args.path)
+                log_event("bot_webhook_started", host=args.host, port=str(args.port), path=args.path)
+                await run_webhook_server(app, host=args.host, port=args.port, stop=stop)
+            else:
+                log_event("bot_polling_started")
+                await run_polling(client, bot, stop)
+            await runner.aclose(SHUTDOWN_TIMEOUT_S)
+    except RedisError:
+        log_event("redis_unavailable")
+        return 1
+    finally:
+        await client.aclose()
+        if recognizer is not None:
+            await recognizer.aclose()
+        log_event("bot_stopped")
+    return 0
+
+
+async def manage_subscriptions(command: str, args: argparse.Namespace) -> int:
+    """subscribe / unsubscribe / subscriptions; prints only URLs and safe error codes."""
+    settings = BotSettings.from_env()
+    client = MaxClient(settings)
+    try:
+        if command == "subscribe":
+            if not settings.webhook_secret:
+                raise ValueError("MAX_WEBHOOK_SECRET is required to subscribe")
+            await client.subscribe(url=args.url, secret=settings.webhook_secret, update_types=UPDATE_TYPES)
+            print(f"Подписка создана: {args.url}")
+        elif command == "unsubscribe":
+            await client.unsubscribe(url=args.url)
+            print(f"Подписка удалена: {args.url}")
+        else:
+            urls = await client.list_subscriptions()
+            print("\n".join(urls) if urls else "Подписок нет: бот работает через long polling")
+    except SubscriptionError as error:
+        print(f"Ошибка MAX: {error.code} ({error})")
+        return 1
+    finally:
+        await client.aclose()
+    return 0
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="python -m app.bot", description="Локальный запуск MAX-бота")
+    commands = parser.add_subparsers(dest="command")
+    commands.add_parser("polling", help="long polling (по умолчанию)")
+    webhook = commands.add_parser("webhook", help="локальный HTTP-сервер для webhook MAX")
+    webhook.add_argument("--host", default="127.0.0.1")
+    webhook.add_argument("--port", type=int, default=8080)
+    webhook.add_argument("--path", default="/max/webhook")
+    for name, text in (("subscribe", "подписать бота на webhook"), ("unsubscribe", "удалить подписку")):
+        command = commands.add_parser(name, help=text)
+        command.add_argument("--url", required=True, help="https://<host>/max/webhook")
+    commands.add_parser("subscriptions", help="показать текущие подписки")
+    args = parser.parse_args(argv)
+    if args.command is None:
+        args.command = "polling"
+    return args
+
+
+async def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    if args.command in ("polling", "webhook"):
+        return await serve(args.command, args)
+    return await manage_subscriptions(args.command, args)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    try:
+        raise SystemExit(asyncio.run(main()))
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None
+    except ValueError as error:
+        # Settings errors; messages are fixed texts and never contain the token.
+        raise SystemExit(f"Некорректные настройки бота: {error}") from None
