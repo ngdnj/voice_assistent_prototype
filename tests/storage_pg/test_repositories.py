@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from app.planner.meeting import create_meeting
 from app.planner.meeting_repository import MeetingAlreadyExistsError
 from app.planner.meeting_service import MeetingService
-from app.planner.operation import OperationConflictError
+from app.planner.operation import CreationOperation, OperationConflictError
 from app.planner.query import RecordQuery
 from app.planner.reminder_repository import ReminderStorageError
 from app.planner.reminder_service import ReminderService
@@ -130,6 +130,88 @@ class PostgresRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(task.created_at.microsecond, 123456)
         self.assertIsNone(meeting.ends_at)
 
+    async def test_reschedule_is_atomic_idempotent_owner_scoped_and_updates_period(self) -> None:
+        original = await self.meeting_service.create_meeting(
+            owner_id=self.owner,
+            title="Хакатон",
+            starts_at=CREATED,
+            ends_at=CREATED + timedelta(hours=4),
+            operation_id="meeting",
+        )
+        args = {
+            "meeting_id": original.id,
+            "owner_id": self.owner,
+            "starts_at": CREATED + timedelta(days=1),
+            "operation_id": "move",
+        }
+        moved = await asyncio.gather(*(self.meeting_service.reschedule_meeting(**args) for _ in range(6)))
+        self.assertTrue(all(record == moved[0] for record in moved))
+        self.assertEqual(
+            moved[0],
+            replace(original, starts_at=args["starts_at"], ends_at=args["starts_at"] + timedelta(hours=4)),
+        )
+        self.assertEqual(await self.count_rows(), 1)
+        self.assertEqual(await self.count_rows(operations), 2)
+        self.assertIsNone(await self.meeting_service.reschedule_meeting(**{**args, "owner_id": self.other}))
+        with self.assertRaises(OperationConflictError):
+            await self.meeting_service.reschedule_meeting(**{**args, "starts_at": CREATED})
+        self.assertEqual(
+            await self.meetings.list(
+                RecordQuery(owner_id=self.owner, start_time=CREATED, end_time=CREATED + timedelta(days=1))
+            ),
+            [],
+        )
+        new_repo = PostgresMeetingRepository(self.sessions)
+        self.assertEqual(await new_repo.get(meeting_id=original.id, owner_id=self.owner), moved[0])
+        # Replaying an older action must not undo a more recent move.
+        later = await self.meeting_service.reschedule_meeting(
+            **{**args, "starts_at": CREATED + timedelta(days=2), "operation_id": "move-2"}
+        )
+        self.assertEqual(await self.meeting_service.reschedule_meeting(**args), later)
+
+    async def test_failed_reschedule_does_not_save_operation_or_time(self) -> None:
+        original = await self.meeting_service.create_meeting(
+            owner_id=self.owner,
+            title="Хакатон",
+            starts_at=CREATED,
+            ends_at=CREATED + timedelta(hours=1),
+            operation_id="meeting",
+        )
+        args = {"meeting_id": original.id, "owner_id": self.owner, "operation_id": "bad"}
+        with self.assertRaises(ValueError):
+            await self.meeting_service.reschedule_meeting(**args, ends_at=CREATED)
+        self.assertEqual(await self.count_rows(operations), 1)
+        self.assertEqual(await self.meetings.get(meeting_id=original.id, owner_id=self.owner), original)
+        # Reusing a creation action for a move conflicts without changing the event.
+        with self.assertRaises(OperationConflictError):
+            await self.meeting_service.reschedule_meeting(
+                **{**args, "operation_id": "meeting"}, starts_at=CREATED + timedelta(days=1)
+            )
+        self.assertEqual(await self.meetings.get(meeting_id=original.id, owner_id=self.owner), original)
+
+    async def test_stale_reschedule_cannot_overwrite_a_later_change(self) -> None:
+        original = await self.meeting_service.create_meeting(
+            owner_id=self.owner,
+            title="Хакатон",
+            starts_at=CREATED,
+            operation_id="meeting",
+        )
+        current = await self.meeting_service.reschedule_meeting(
+            meeting_id=original.id,
+            owner_id=self.owner,
+            starts_at=CREATED + timedelta(days=1),
+            operation_id="move",
+        )
+        with self.assertRaises(OperationConflictError):
+            await self.meetings.reschedule(
+                replace(original, starts_at=CREATED + timedelta(days=2)),
+                previous=original,
+                operation=CreationOperation.from_data("stale", meeting_id=str(original.id)),
+                changed_at=CREATED,
+            )
+        self.assertEqual(await self.meetings.get(meeting_id=original.id, owner_id=self.owner), current)
+        self.assertEqual(await self.count_rows(operations), 2)
+
     async def test_owner_and_type_isolation(self) -> None:
         task = await self.task_service.create_task(owner_id=self.owner, title="Отчёт", operation_id="t-1")
         self.assertIsNone(await self.tasks.get(task_id=task.id, owner_id=self.other))
@@ -139,6 +221,67 @@ class PostgresRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.reminders.get(reminder_id=task.id, owner_id=self.owner))
         self.assertEqual(await self.meetings.list(RecordQuery(owner_id=self.owner)), [])
         self.assertIsNone(await self.tasks.get(task_id=uuid4(), owner_id=self.owner))
+
+    async def test_explicit_sort_is_applied_before_limit_for_every_order(self) -> None:
+        stored = []
+        for index, (name, minutes) in enumerate([("Альфа", 20), ("Бета", 240), ("Гамма", None)]):
+            record = create_meeting(
+                owner_id=self.owner,
+                title=name,
+                starts_at=CREATED + timedelta(hours=index),
+                created_at=CREATED + timedelta(seconds=index),
+                ends_at=None if minutes is None else CREATED + timedelta(hours=index, minutes=minutes),
+            )
+            await self.meetings.add(record)
+            stored.append(record)
+        await self.meetings.add(
+            create_meeting(
+                owner_id=self.other,
+                title="Чужая",
+                starts_at=CREATED + timedelta(days=10),
+                ends_at=CREATED + timedelta(days=11),
+                created_at=CREATED,
+            )
+        )
+        for sort, expected in {
+            "time_asc": [0, 1, 2],
+            "time_desc": [2, 1, 0],
+            "duration_asc": [0, 1, 2],
+            "duration_desc": [1, 0, 2],
+            "name_asc": [0, 1, 2],
+            "name_desc": [2, 1, 0],
+            "created_asc": [0, 1, 2],
+            "created_desc": [2, 1, 0],
+        }.items():
+            with self.subTest(sort=sort):
+                rows = await self.meetings.list(RecordQuery(owner_id=self.owner, sort=sort, limit=1))
+                self.assertEqual(rows, [stored[expected[0]]])
+                rows = await self.meetings.list(
+                    RecordQuery(owner_id=self.owner, sort=sort, limit=2, offset=1)
+                )
+                self.assertEqual(rows, [stored[i] for i in expected[1:]])
+
+    async def test_explicit_task_time_sort_uses_deadline_and_puts_undated_last(self) -> None:
+        undated = await self.task_service.create_task(
+            owner_id=self.owner, title="Без срока", operation_id="u"
+        )
+        dated = await self.task_service.create_task(
+            owner_id=self.owner, title="Дата", operation_id="d", due_date=date(2026, 10, 27)
+        )
+        exact = await self.task_service.create_task(
+            owner_id=self.owner,
+            title="Момент",
+            operation_id="e",
+            due_at=datetime(2026, 10, 26, 23, tzinfo=UTC),
+        )
+        rows = await self.tasks.list(
+            RecordQuery(owner_id=self.owner, sort="time_asc", timezone="Europe/Moscow")
+        )
+        self.assertEqual(rows, [dated, exact, undated])
+        rows = await self.tasks.list(
+            RecordQuery(owner_id=self.owner, sort="time_desc", timezone="Europe/Moscow")
+        )
+        self.assertEqual(rows, [exact, dated, undated])
 
     async def test_replay_conflict_and_single_row(self) -> None:
         first = await self.task_service.create_task(owner_id=self.owner, title="Отчёт", operation_id="t-1")

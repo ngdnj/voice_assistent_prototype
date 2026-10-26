@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     gigachat_credentials: SecretStr | None = None
     gigachat_scope: str = "GIGACHAT_API_PERS"
     gigachat_model: str = "GigaChat-2-Max"
+    # Canonical API for new connections since July 2026 (official GigaChat docs).
+    gigachat_base_url: str = "https://api.giga.chat/v1/"
     gigachat_verify_ssl: bool = True
     gigachat_ca_bundle_file: str | None = None
 
@@ -26,8 +28,7 @@ class Settings(BaseSettings):
     llm_price_input_rub_per_1k: float = 0.0
     llm_price_output_rub_per_1k: float = 0.0
 
-    # delete_event is not one of the three MVP MCP tools (AGENTS §8): until role 4 agrees
-    # on its contract, the prompt does not mention it and the agent does not get the tool.
+    # Selects the deletion eval cases. Product tools are available independently of this flag.
     enable_delete_event: bool = False
 
     # ASR

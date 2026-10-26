@@ -9,8 +9,26 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any
+from uuid import UUID
 
 Check = Callable[[dict[str, Any]], str | None]
+
+
+def uuid_argument(key: str) -> Check:
+    """Generated PostgreSQL IDs are UUIDs, never the old fixture's integer positions."""
+
+    def check(args: dict[str, Any]) -> str | None:
+        value = args.get(key)
+        if not isinstance(value, str):
+            return f"{key} должен быть UUID из результата инструмента"
+        try:
+            UUID(value)
+        except ValueError:
+            return f"{key} должен быть UUID из результата инструмента"
+        return None
+
+    return check
+
 
 END_TOLERANCE = timedelta(minutes=1)
 
@@ -24,11 +42,11 @@ _RELATIVE_TIME_RE = re.compile(r"\bчерез\s+(?:[\wё-]+\s+)?(?:полчас�
 _CLOCK_RE = re.compile(r"\b\d{1,2}:\d{2}\b")
 
 
-def speech_issues(answer: str) -> list[str]:
+def speech_issues(answer: str, *, allow_lists: bool = False) -> list[str]:
     issues = []
     if _MARKDOWN_RE.search(answer):
         issues.append("в ответе markdown — плохо для озвучивания")
-    if "\n" in answer.strip():
+    if not allow_lists and "\n" in answer.strip():
         issues.append("в ответе переносы строк")
     if _EMOJI_RE.search(answer):
         issues.append("в ответе эмодзи")

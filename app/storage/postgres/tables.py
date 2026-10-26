@@ -42,6 +42,7 @@ events = Table(
     Column("ends_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
+    Column("deleted_at", DateTime(timezone=True), nullable=True),
     # Lexical full-text search (Russian stemming), not semantic search.
     Column(
         "search",
@@ -89,7 +90,9 @@ operations = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     PrimaryKeyConstraint("owner_id", "operation_id"),
     CheckConstraint(
-        "operation_type IN ('create_task', 'create_meeting', 'create_reminder')", name="operation_type"
+        "operation_type IN ('create_task', 'create_meeting', 'create_reminder', "
+        "'reschedule_meeting', 'update_event', 'delete_event')",
+        name="operation_type",
     ),
     CheckConstraint("char_length(operation_id) BETWEEN 1 AND 200", name="operation_id_length"),
     CheckConstraint("fingerprint ~ '^[0-9a-f]{64}$'", name="fingerprint_sha256"),

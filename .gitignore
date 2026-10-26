@@ -23,3 +23,5 @@ data/
 evals/reports/
 
 .DS_Store
+
+russian_trusted_root_ca.pem

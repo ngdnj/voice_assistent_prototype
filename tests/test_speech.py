@@ -1,9 +1,16 @@
-from app.llm.speech import to_speech_text
+from app.llm.speech import to_chat_text, to_speech_text
 from evals.checks import speech_issues
 
 
 def test_plain_text_is_unchanged() -> None:
     assert to_speech_text("Встреча с командой завтра в 15:00.") == "Встреча с командой завтра в 15:00."
+
+
+def test_chat_keeps_numbering_and_line_breaks_while_speech_removes_them():
+    raw = "Встречи:\n1) **Хакатон** в 10:00\n2) Созвон в 15:00"
+    chat = to_chat_text(raw)
+    assert chat == "Встречи:\n1) Хакатон в 10:00\n2) Созвон в 15:00"
+    assert "\n" not in to_speech_text(chat) and "1)" not in to_speech_text(chat)
 
 
 def test_markdown_list_becomes_one_spoken_line() -> None:

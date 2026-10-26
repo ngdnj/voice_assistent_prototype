@@ -6,7 +6,8 @@
     uv run python -m evals.run -k today search_      # cases whose id starts with a prefix
     uv run python -m evals.run --repeat 3 --temperature 0.3
 
-Each case gets a fresh in-memory storage and history, so cases are independent.
+Each case gets an isolated owner in a dedicated test PostgreSQL and in-memory history.
+Records are removed after the case; MCP schemas and business rules are the real implementation.
 A JSON report is written to evals/reports/; `python -m evals.summary` builds the model table.
 """
 
@@ -18,18 +19,14 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, get_args
-from zoneinfo import ZoneInfo
+
+from langchain_core.language_models import BaseChatModel
 
 from app.agent.agent import AgentReply, Assistant, Pricing
 from app.agent.history import InMemoryChatHistory
-from fastmcp import Client
-from langchain_core.language_models import BaseChatModel
-from tests.fakes.events import EventType
-from tests.fakes.mcp_server import build_server
-from tests.fakes.storage import EventStorage
-
 from app.config import Settings, get_settings
 from app.llm.model import build_chat_model
+from evals.backend import evaluation_backend
 from evals.cases import CASES, Case, Category, Split
 from evals.checks import Check, speech_issues
 from evals.cloudru import CloudRuSettings, build_cloudru_model
@@ -38,7 +35,7 @@ from evals.stats import summarize
 REPORTS_DIR = Path(__file__).parent / "reports"
 INFRA_ATTEMPTS = 3
 # Without an explicit expectation nothing may change the user's records.
-MUTATING_TOOLS = ("create_event", "delete_event")
+MUTATING_TOOLS = ("create_event", "reschedule_meeting", "update_event", "delete_event")
 
 
 @dataclass
@@ -68,10 +65,19 @@ def _first_error(checks: list[Check], args: dict[str, Any]) -> str | None:
 def _evaluate(case: Case, reply: AgentReply) -> list[str]:
     expect = case.expect
     errors: list[str] = []
-    forbidden = set(expect.forbid) or (set(MUTATING_TOOLS) if expect.tool is None else set())
+    forbidden = set(expect.forbid)
+    if expect.tool in {None, "get_events_by_period", "get_event_by_query"}:
+        forbidden.update(MUTATING_TOOLS)
     for call in reply.tool_calls:
         if call.name in forbidden:
             errors.append(f"не должно быть {call.name}, вызвано: {call.args}")
+        if call.result is not None and "error" in call.result:
+            errors.append(f"инструмент {call.name} вернул ошибку")
+        if call.name == "delete_event" and call.result is not None and "deleted" in call.result:
+            deleted_name = str(call.result["deleted"].get("name", "")).lower()
+            for words in expect.answer_mentions:
+                if not any(word.lower() in deleted_name for word in words.split("|")):
+                    errors.append("удалена запись, не соответствующая ожидаемой")
     if expect.tool is not None:
         calls = [c for c in reply.tool_calls if c.name == expect.tool]
         if not calls:
@@ -87,7 +93,8 @@ def _evaluate(case: Case, reply: AgentReply) -> list[str]:
     for words in expect.answer_mentions:  # "a|b" means any of the alternatives
         if not any(w.lower() in answer for w in words.split("|")):
             errors.append(f"в ответе нет «{words}»")
-    errors += speech_issues(reply.text)
+    # AgentReply is displayed in chat. TTS still has its separate to_speech_text boundary.
+    errors += speech_issues(reply.text, allow_lists=True)
     return errors
 
 
@@ -101,27 +108,30 @@ def _seed_time(value: str | None) -> tuple[datetime | None, date | None]:
 
 
 async def _run_case(case: Case, settings: Settings, model: BaseChatModel) -> CaseResult:
-    tz = ZoneInfo(case.timezone)
-    storage = EventStorage(":memory:", tz)
-    for seed in case.seed:
-        when, due_date = _seed_time(seed.when)
-        storage.create("eval", EventType(seed.event_type), seed.name, seed.description, when, due_date)
-
-    enable_delete = settings.enable_delete_event
-    async with Client(build_server(storage, tz, enable_delete=enable_delete)) as client:
+    async with evaluation_backend(case.now, case.timezone) as client:
+        for number, seed in enumerate(case.seed):
+            when, due_date = _seed_time(seed.when)
+            arguments: dict[str, Any] = {
+                "event_type": seed.event_type,
+                "name": seed.name,
+                "description": seed.description,
+            }
+            if when is not None:
+                arguments["datetime"] = when.isoformat()
+            if due_date is not None:
+                arguments["date"] = due_date.isoformat()
+            await client.seed(arguments, action_id=f"seed-{number}")
         assistant = Assistant(
             model,
             client,
             InMemoryChatHistory(10),
             Pricing(*settings.pricing),
-            enable_delete=enable_delete,
         )
         # Every turn keeps the case's reference time, like a retried job keeps the original one.
         replies = [
-            await assistant.handle("eval", turn, reference_time=case.now, timezone=case.timezone)
+            await assistant.handle(client.owner, turn, reference_time=case.now, timezone=case.timezone)
             for turn in case.turns
         ]
-    storage.close()
 
     last = replies[-1]
     errors = _evaluate(case, last)
@@ -219,7 +229,7 @@ async def main() -> int:
     parser.add_argument(
         "--enable-delete",
         action="store_true",
-        help="give the agent delete_event and run the delete cases (not an MVP tool, off by default)",
+        help="include deletion eval cases; the product agent already supports deletion",
     )
     args = parser.parse_args()
 

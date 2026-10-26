@@ -163,6 +163,8 @@ class RedisTaskRepository:
             raise TaskStorageError("Stored task data is invalid") from None
 
     async def list(self, query: RecordQuery) -> list[Task]:
+        if query.sort is not None:
+            raise ValueError("Explicit sort requires the PostgreSQL adapter")
         if query.task_period != "created_at":
             # The Redis index is ordered by created_at; deadline periods are served by PostgreSQL.
             raise ValueError("Redis task storage filters periods by created_at only")

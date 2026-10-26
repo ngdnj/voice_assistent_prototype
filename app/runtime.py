@@ -49,6 +49,7 @@ class RuntimeSettings:
 
 @dataclass(frozen=True)
 class Backend:
+    redis: Redis
     tasks: TaskService
     meetings: MeetingService
     reminders: ReminderService
@@ -58,6 +59,7 @@ class Backend:
 def build_backend(client: Redis, *, clock: Callable[[], datetime]) -> Backend:
     """One shared pool; providers and transports are deliberately not started."""
     return Backend(
+        redis=client,
         tasks=TaskService(repository=RedisTaskRepository(client), clock=clock),
         meetings=MeetingService(repository=RedisMeetingRepository(client), clock=clock),
         reminders=ReminderService(repository=RedisReminderRepository(client), clock=clock),

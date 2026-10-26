@@ -39,9 +39,23 @@ def build_chat_model(settings: Settings) -> BaseChatModel:
         credentials=settings.gigachat_credentials.get_secret_value(),
         scope=settings.gigachat_scope,
         model=settings.gigachat_model,
+        base_url=settings.gigachat_base_url,
         temperature=settings.llm_temperature,
         timeout=settings.llm_timeout_s,
         max_retries=settings.llm_max_retries,
         verify_ssl_certs=settings.gigachat_verify_ssl,
         ca_bundle_file=settings.gigachat_ca_bundle_file,
     )
+
+
+async def close_chat_model(model: BaseChatModel) -> None:
+    """Close the lazily created SDK client of the selected provider, if used.
+
+    `_client` is the cached SDK property of langchain-gigachat 0.5.1. Keep this
+    provider detail here; accessing the dictionary avoids opening an unused client.
+    """
+    from gigachat import GigaChat
+
+    client = model.__dict__.get("_client")
+    if isinstance(client, GigaChat):
+        await client.aclose()

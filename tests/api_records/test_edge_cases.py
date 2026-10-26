@@ -48,7 +48,7 @@ class RestOrderingEdgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self) -> None:
         app = FastAPI()
-        tools = EventTools(None, None, None)  # type: ignore[arg-type]
+        tools = EventTools(None, None, None, None)  # type: ignore[arg-type]
         app.include_router(build_records_router(tools, bot_token=BOT_TOKEN, clock=lambda: NOW))
         transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
         self.client = httpx.AsyncClient(transport=transport, base_url="http://test")
