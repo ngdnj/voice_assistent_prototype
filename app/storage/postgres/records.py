@@ -1,14 +1,15 @@
 """Shared PostgreSQL storage for tasks, meetings and reminders in the events table."""
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Row, and_, func, select
+from sqlalchemy import ColumnElement, Row, and_, case, func, literal, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.types import TIMESTAMP
 
 from app.planner.operation import CreationOperation, OperationConflictError
 from app.planner.query import RecordQuery
@@ -56,8 +57,11 @@ class PostgresEventStore[R]:
         except (ValueError, TypeError):
             raise self.storage_error("Stored record data is invalid") from None
 
-    def _owned(self, owner_id: str) -> ColumnElement[bool]:
-        return and_(events.c.owner_id == owner_id, events.c.event_type == self.event_type)
+    def _owned(self, owner_id: str, *, include_deleted: bool = False) -> ColumnElement[bool]:
+        conditions = [events.c.owner_id == owner_id, events.c.event_type == self.event_type]
+        if not include_deleted:
+            conditions.append(events.c.deleted_at.is_(None))
+        return and_(*conditions)
 
     async def add(self, record: R, *, operation: CreationOperation | None = None) -> R:
         """Insert the record and, if given, its operation result in one transaction."""
@@ -102,6 +106,9 @@ class PostgresEventStore[R]:
 
     async def get_created(self, *, owner_id: str, operation: CreationOperation) -> R | None:
         """Return the record created by this operation in its current state, or raise on different data."""
+        return await self._get_operation(owner_id=owner_id, operation=operation, kind=self.operation_type)
+
+    async def _get_operation(self, *, owner_id: str, operation: CreationOperation, kind: str) -> R | None:
         async with self._storage_errors("Operation read failed"), self._sessions() as session:
             saved = (
                 await session.execute(
@@ -114,7 +121,7 @@ class PostgresEventStore[R]:
             ).first()
             # One action_id is one logical action: reusing it for another record type is a conflict too.
             matches = saved is not None and (saved.operation_type, saved.fingerprint) == (
-                self.operation_type,
+                kind,
                 operation.fingerprint,
             )
             if saved is None or not matches:
@@ -122,7 +129,9 @@ class PostgresEventStore[R]:
             else:
                 row = (
                     await session.execute(
-                        select(events).where(events.c.id == saved.event_id, self._owned(owner_id))
+                        select(events).where(
+                            events.c.id == saved.event_id, self._owned(owner_id, include_deleted=True)
+                        )
                     )
                 ).first()
         if saved is None:
@@ -131,6 +140,8 @@ class PostgresEventStore[R]:
             raise OperationConflictError("operation_id was already used with different data")
         if row is None:
             raise self.storage_error("Operation result is inconsistent with its record")
+        if row.deleted_at is not None:
+            raise OperationConflictError("The record was deleted; replay cannot restore it")
         return self._decode(row)
 
     async def _get(self, record_id: UUID, owner_id: str) -> R | None:
@@ -158,10 +169,34 @@ class PostgresEventStore[R]:
             statement = statement.where(
                 events.c.search.op("@@")(func.websearch_to_tsquery("russian", query.query))
             )
-        statement = statement.order_by(moment, events.c.id).limit(query.limit).offset(query.offset)
+        ordering = self._ordering(query, moment)
+        statement = statement.order_by(*ordering, events.c.id).limit(query.limit).offset(query.offset)
         async with self._storage_errors("Record storage read failed"), self._sessions() as session:
             rows = (await session.execute(statement)).all()
         return [self._decode(row) for row in rows]
+
+    def _ordering(
+        self, query: RecordQuery, legacy_moment: ColumnElement[Any]
+    ) -> Sequence[ColumnElement[Any]]:
+        if query.sort is None:
+            return [legacy_moment]
+        field, direction = query.sort.split("_")
+        value: ColumnElement[Any]
+        if field == "name":
+            value = func.replace(func.lower(events.c.name), "ё", "е").collate("C")
+        elif field == "created":
+            value = events.c.created_at
+        elif field == "duration":
+            value = case((events.c.event_type == "meeting", events.c.ends_at - events.c.scheduled_at))
+        elif self.event_type == "task":
+            # Date-only deadlines get a sorting position, not an invented stored time.
+            local_midnight = func.timezone(
+                literal(query.timezone or "UTC"), func.cast(events.c.due_date, TIMESTAMP)
+            )
+            value = func.coalesce(events.c.scheduled_at, local_midnight)
+        else:
+            value = events.c.scheduled_at
+        return [(value.desc() if direction == "desc" else value.asc()).nulls_last()]
 
 
 def require(row: RecordRow, column: str) -> Any:

@@ -8,7 +8,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict
 
 from app.planner.meeting import Meeting
-from app.planner.query import local_day_start_utc
+from app.planner.query import RecordSort, local_day_start_utc
 from app.planner.reminder import Reminder
 from app.planner.task import Task
 
@@ -88,3 +88,34 @@ def error(code: ErrorCode, message: str, field: str | None = None) -> dict[str, 
 
 def events_result(events: list[EventDTO], **extra: Any) -> dict[str, Any]:
     return {"events": [event.model_dump(mode="json") for event in events], **extra}
+
+
+def sort_events(events: list[EventDTO], sort: RecordSort, timezone: str) -> list[EventDTO]:
+    """Merge separately ordered type pages with the same rules as PostgreSQL (NULLS LAST)."""
+    ordered = sorted(events, key=lambda event: event.id)
+    reverse = sort.endswith("_desc")
+    if sort.startswith("name_"):
+        return sorted(ordered, key=lambda event: event.name.lower().replace("ё", "е"), reverse=reverse)
+    if sort.startswith("created_"):
+        return sorted(ordered, key=lambda event: event.created_at, reverse=reverse)
+    if sort.startswith("duration_"):
+        durations = [
+            (event.end_time - event.datetime, event)
+            for event in ordered
+            if event.event_type == "meeting" and event.end_time is not None and event.datetime is not None
+        ]
+        known = {event.id for _, event in durations}
+        return [event for _, event in sorted(durations, key=lambda pair: pair[0], reverse=reverse)] + [
+            event for event in ordered if event.id not in known
+        ]
+    moments: list[tuple[dt.datetime, EventDTO]] = []
+    missing: list[EventDTO] = []
+    for event in ordered:
+        moment = event.datetime
+        if moment is None and event.date is not None:
+            moment = local_day_start_utc(event.date, timezone)
+        if moment is None:
+            missing.append(event)
+        else:
+            moments.append((moment, event))
+    return [event for _, event in sorted(moments, key=lambda pair: pair[0], reverse=reverse)] + missing

@@ -1,4 +1,4 @@
-"""Transport-independent logic of the three MCP tools: parse arguments, call planner, shape results.
+"""Transport-independent MCP logic: parse arguments, call planner, shape results.
 
 No business rules live here: names, dates and statuses are validated by app/planner. This layer
 only checks argument shapes, maps planner errors to the structured error format and limits output.
@@ -12,11 +12,13 @@ from typing import Any
 from uuid import UUID
 
 from app.mcp_server.context import TrustedContext
-from app.mcp_server.schemas import EVENT_TYPES, EventDTO, EventType, error, events_result
+from app.mcp_server.schemas import EVENT_TYPES, EventDTO, EventType, error, events_result, sort_events
+from app.planner.event_repository import EventMutationStorageError
+from app.planner.event_service import EventService
 from app.planner.meeting_repository import MeetingStorageError
 from app.planner.meeting_service import MeetingService
 from app.planner.operation import OperationConflictError
-from app.planner.query import RecordQuery
+from app.planner.query import RECORD_SORTS, RecordQuery, RecordSort
 from app.planner.reminder import PastReminderTimeError
 from app.planner.reminder_repository import ReminderStorageError
 from app.planner.reminder_service import ReminderService
@@ -31,7 +33,7 @@ MAX_PERIOD = timedelta(days=366)
 PERIOD_LIMIT = 100
 SEARCH_LIMIT_DEFAULT = 10
 SEARCH_LIMIT_MAX = 50
-STORAGE_ERRORS = (TaskStorageError, MeetingStorageError, ReminderStorageError)
+STORAGE_ERRORS = (TaskStorageError, MeetingStorageError, ReminderStorageError, EventMutationStorageError)
 DATE_FORMAT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 
@@ -40,6 +42,22 @@ class ArgumentError(ValueError):
         super().__init__(message)
         self.message = message
         self.field = field
+
+
+def _sort(value: Any) -> RecordSort:
+    if value is None:
+        return "time_asc"
+    if not isinstance(value, str) or value not in RECORD_SORTS:
+        raise ArgumentError("Неизвестный порядок сортировки", "sort")
+    return value
+
+
+def _limit(value: Any, *, default: int, maximum: int) -> int:
+    if value is None:
+        return default
+    if type(value) is not int or not 1 <= value <= maximum:
+        raise ArgumentError(f"limit — целое от 1 до {maximum}", "limit")
+    return value
 
 
 def _moment(value: Any, field: str, *, required: bool = False) -> datetime | None:
@@ -103,6 +121,8 @@ def _period(start: Any, end: Any, *, required: bool) -> tuple[datetime | None, d
 
 # Planner messages are English; the agent gets a short Russian explanation and the argument name.
 _PLANNER_FIELDS = (
+    ("task_date", "date", "Дата без времени допустима только у задачи"),
+    ("meeting_end", "end_time", "Окончание можно менять только у встречи"),
     ("description", "description", "Описание длиннее 2000 символов"),
     ("title", "name", "Название не может быть пустым и длиннее 200 символов"),
     ("text", "name", "Название не может быть пустым и длиннее 200 символов"),
@@ -128,6 +148,95 @@ class EventTools:
     tasks: TaskService
     meetings: MeetingService
     reminders: ReminderService
+    editor: EventService
+
+    async def update_event(self, context: TrustedContext, arguments: dict[str, Any]) -> dict[str, Any]:
+        return await self._edit(context, arguments, delete=False)
+
+    async def delete_event(self, context: TrustedContext, arguments: dict[str, Any]) -> dict[str, Any]:
+        return await self._edit(context, arguments, delete=True)
+
+    async def _edit(
+        self, context: TrustedContext, arguments: dict[str, Any], *, delete: bool
+    ) -> dict[str, Any]:
+        if context.action_id is None:
+            return error("unauthorized", "Нет X-Action-Id: идентификатор действия задаёт backend", None)
+        try:
+            event_id = UUID(_text(arguments.get("event_id"), "event_id", required=True))
+        except ValueError:
+            return error("not_found", "Запись не найдена", "event_id")
+        try:
+            if delete:
+                record = await self.editor.delete_event(
+                    event_id=event_id, owner_id=context.owner_id, operation_id=context.action_id
+                )
+            else:
+                name = arguments.get("name")
+                record = await self.editor.update_event(
+                    event_id=event_id,
+                    owner_id=context.owner_id,
+                    operation_id=context.action_id,
+                    name=None if name is None else _text(name, "name", required=True),
+                    moment=_moment(arguments.get("datetime"), "datetime"),
+                    day=_date(arguments.get("date"), "date"),
+                    end_time=_moment(arguments.get("end_time"), "end_time"),
+                )
+        except ArgumentError as exc:
+            return error("validation_error", exc.message, exc.field)
+        except OperationConflictError:
+            return error("operation_conflict", "Действие или запись уже изменились; перечитайте запись", None)
+        except STORAGE_ERRORS:
+            LOGGER.warning(
+                "storage_unavailable",
+                extra={
+                    "request_id": context.request_id,
+                    "tool": "delete_event" if delete else "update_event",
+                },
+            )
+            return error("temporary_unavailable", "Хранилище недоступно, изменение не подтверждено", None)
+        except (ValueError, TypeError) as exc:
+            return _planner_error(exc)
+        if record is None:
+            return error("not_found", "Запись не найдена или уже удалена", "event_id")
+        return {"deleted" if delete else "updated": EventDTO.from_record(record).model_dump(mode="json")}
+
+    async def reschedule_meeting(self, context: TrustedContext, arguments: dict[str, Any]) -> dict[str, Any]:
+        if context.action_id is None:
+            return error("unauthorized", "Нет X-Action-Id: идентификатор действия задаёт backend", None)
+        try:
+            meeting_id = UUID(_text(arguments.get("meeting_id"), "meeting_id", required=True))
+        except (ArgumentError, ValueError):
+            return error("not_found", "Встреча не найдена", "meeting_id")
+        try:
+            start = _moment(arguments.get("datetime"), "datetime")
+            end = _moment(arguments.get("end_time"), "end_time")
+            if start is None and end is None:
+                raise ArgumentError("Укажите новое начало или окончание встречи", "datetime")
+            record = await self.meetings.reschedule_meeting(
+                meeting_id=meeting_id,
+                owner_id=context.owner_id,
+                operation_id=context.action_id,
+                starts_at=start,
+                ends_at=end,
+            )
+        except ArgumentError as exc:
+            return error("validation_error", exc.message, exc.field)
+        except OperationConflictError:
+            return error(
+                "operation_conflict", "Действие или встреча уже изменились; перечитайте запись", None
+            )
+        except STORAGE_ERRORS:
+            LOGGER.warning(
+                "storage_unavailable", extra={"request_id": context.request_id, "tool": "reschedule_meeting"}
+            )
+            return error(
+                "temporary_unavailable", "Хранилище временно недоступно, перенос не подтверждён", None
+            )
+        except (ValueError, TypeError) as exc:
+            return _planner_error(exc)
+        if record is None:
+            return error("not_found", "Встреча не найдена", "meeting_id")
+        return {"updated": EventDTO.from_record(record).model_dump(mode="json")}
 
     async def create_event(self, context: TrustedContext, arguments: dict[str, Any]) -> dict[str, Any]:
         if context.action_id is None:
@@ -177,7 +286,7 @@ class EventTools:
         return {"created": EventDTO.from_record(record).model_dump(mode="json")}
 
     async def _collect(
-        self, context: TrustedContext, types: tuple[EventType, ...], **query: Any
+        self, context: TrustedContext, types: tuple[EventType, ...], *, sort: RecordSort, **query: Any
     ) -> list[EventDTO]:
         events: list[EventDTO] = []
         # With a period, tasks are selected by deadline; a search without a period covers all tasks.
@@ -190,16 +299,20 @@ class EventTools:
                         owner_id=context.owner_id,
                         task_period="due" if has_period else "created_at",
                         timezone=context.timezone,
+                        sort=sort,
                         **query,
                     )
                 )
             elif event_type == "meeting":
-                records = await self.meetings.list_meetings(RecordQuery(owner_id=context.owner_id, **query))
+                records = await self.meetings.list_meetings(
+                    RecordQuery(owner_id=context.owner_id, sort=sort, **query)
+                )
             else:
-                records = await self.reminders.list_reminders(RecordQuery(owner_id=context.owner_id, **query))
+                records = await self.reminders.list_reminders(
+                    RecordQuery(owner_id=context.owner_id, sort=sort, **query)
+                )
             events.extend(EventDTO.from_record(record) for record in records)
-        events.sort(key=lambda event: event.sort_key(context.timezone))
-        return events
+        return sort_events(events, sort, context.timezone)
 
     async def get_events_by_period(
         self, context: TrustedContext, arguments: dict[str, Any]
@@ -209,11 +322,18 @@ class EventTools:
                 arguments.get("start_time"), arguments.get("end_time"), required=True
             )
             types = _types(arguments.get("event_types"))
+            sort = _sort(arguments.get("sort"))
+            limit = _limit(arguments.get("limit"), default=PERIOD_LIMIT, maximum=PERIOD_LIMIT)
         except ArgumentError as exc:
             return error("validation_error", exc.message, exc.field)
         try:
             events = await self._collect(
-                context, types, start_time=start_time, end_time=end_time, limit=PERIOD_LIMIT
+                context,
+                types,
+                sort=sort,
+                start_time=start_time,
+                end_time=end_time,
+                limit=min(limit + 1, PERIOD_LIMIT),
             )
         except STORAGE_ERRORS:
             LOGGER.warning(
@@ -224,7 +344,7 @@ class EventTools:
         except ValueError:
             return error("validation_error", "Период нельзя сопоставить с местными датами", "start_time")
         # A full page of any type means more records may exist beyond the limit.
-        return events_result(events[:PERIOD_LIMIT], truncated=len(events) >= PERIOD_LIMIT)
+        return events_result(events[:limit], truncated=len(events) > limit or len(events) >= PERIOD_LIMIT)
 
     async def get_event_by_query(self, context: TrustedContext, arguments: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -235,23 +355,20 @@ class EventTools:
             start_time, end_time = _period(
                 arguments.get("start_time"), arguments.get("end_time"), required=False
             )
-            limit = arguments.get("limit", SEARCH_LIMIT_DEFAULT)
-            if limit is None:
-                limit = SEARCH_LIMIT_DEFAULT
-            if type(limit) is not int or not 1 <= limit <= SEARCH_LIMIT_MAX:
-                raise ArgumentError("limit — целое от 1 до 50", "limit")
+            limit = _limit(arguments.get("limit"), default=SEARCH_LIMIT_DEFAULT, maximum=SEARCH_LIMIT_MAX)
+            sort = _sort(arguments.get("sort"))
         except ArgumentError as exc:
             return error("validation_error", exc.message, exc.field)
         try:
             events = await self._collect(
-                # Each type is fetched up to the maximum and cut after the common sort: tasks without a
-                # period are selected by creation time but ordered by deadline.
+                # One extra result per type detects a shortened page after the common sort.
                 context,
                 types,
+                sort=sort,
                 query=text,
                 start_time=start_time,
                 end_time=end_time,
-                limit=SEARCH_LIMIT_MAX,
+                limit=limit + 1,
             )
         except STORAGE_ERRORS:
             LOGGER.warning(
@@ -260,7 +377,7 @@ class EventTools:
             return error("temporary_unavailable", "Хранилище временно недоступно", None)
         except ValueError:
             return error("validation_error", "Неверные параметры поиска", None)
-        return events_result(events[:limit])
+        return events_result(events[:limit], **({"truncated": True} if len(events) > limit else {}))
 
     async def update_task_status(self, context: TrustedContext, task_id: str, status: Any) -> dict[str, Any]:
         """Mini App status switch (REST only, not an MCP tool): todo, in_progress or done."""

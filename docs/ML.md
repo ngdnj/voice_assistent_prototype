@@ -1,5 +1,11 @@
 # ML-часть: ASR + LLM-агент
 
+> Актуальный backend-контракт агента, MCP client и запуск: [text-agent.md](text-agent.md).
+> Примеры ниже описывают прежний прототип; сырой FastMCP Client теперь заменён
+> на McpGateway с доверенными заголовками. Текущий MCP v6 имеет шесть инструментов,
+> включая update_event и delete_event: [event-editing.md](event-editing.md).
+> ENABLE_DELETE_EVENT теперь выбирает delete-сценарии eval, а не отключает инструмент продукта.
+
 Владелец — роль 3 (AGENTS §5). Здесь интерфейсы, которые роль 1 подключает к очереди и боту,
 порядок выбора ASR, запуск и eval.
 

@@ -1,6 +1,7 @@
 import unittest
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import patch
 from uuid import uuid4
 
 import httpx
@@ -27,7 +28,7 @@ DAY = {
 class DisabledApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_without_bot_token_there_are_no_records_routes(self) -> None:
         settings = McpSettings(service_token="t" * 32, bot_token=None)
-        app = build_app(EventTools(None, None, None), settings)  # type: ignore[arg-type]
+        app = build_app(EventTools(None, None, None, None), settings)  # type: ignore[arg-type]
         paths = {getattr(route, "path", "") for route in app.routes}
         self.assertFalse(any(path.startswith("/api") for path in paths))
 
@@ -47,7 +48,8 @@ class RecordsApiTests(unittest.IsolatedAsyncioTestCase):
         self.user_id = int(uuid4().int % 10**12) + 1
         self.other_id = self.user_id + 1
         self.addAsyncCleanup(self.cleanup)
-        self.tools = build_tools(self.sessions)
+        with patch("app.mcp_server.__main__.clock", return_value=NOW):
+            self.tools = build_tools(self.sessions)
         app = FastAPI()
         app.include_router(build_records_router(self.tools, bot_token=BOT_TOKEN, clock=lambda: NOW))
         self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
@@ -107,6 +109,7 @@ class RecordsApiTests(unittest.IsolatedAsyncioTestCase):
             [event["name"] for event in response.json()["events"]],
             ["Сдать отчёт", "Встреча с Иваном", "Выпить воды"],
         )
+
         tabs = await self.client.get(
             "/api/events", params={**DAY, "event_types": ["meeting", "reminder"]}, headers=self.headers()
         )
@@ -119,6 +122,26 @@ class RecordsApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([event["name"] for event in found.json()["events"]], ["Встреча с Иваном"])
         other = await self.client.get("/api/events", params=DAY, headers=self.headers(self.other_id))
         self.assertEqual(other.json(), {"events": [], "truncated": False})
+
+    async def test_deleted_record_disappears_from_mini_app_and_cannot_change_status(self) -> None:
+        created = await self.create(event_type="task", name="Хакатон", date="2026-10-24")
+        context = TrustedContext(
+            owner_id=str(self.user_id), timezone="Europe/Moscow", request_id="r", action_id="delete"
+        )
+        deleted = await self.tools.delete_event(context, {"event_id": created["id"]})
+        self.assertIn("deleted", deleted)
+        response = await self.client.get("/api/events", params=DAY, headers=self.headers())
+        self.assertEqual(response.json()["events"], [])
+        response = await self.client.get(
+            "/api/events/search",
+            params={"query": "хакатон", "timezone": "Europe/Moscow"},
+            headers=self.headers(),
+        )
+        self.assertEqual(response.json()["events"], [])
+        response = await self.client.patch(
+            f"/api/tasks/{created['id']}/status", json={"status": "done"}, headers=self.headers()
+        )
+        self.assertEqual(response.status_code, 404)
 
     async def test_status_change_is_persisted(self) -> None:
         task = await self.create(event_type="task", name="Сдать отчёт", date="2026-10-24")

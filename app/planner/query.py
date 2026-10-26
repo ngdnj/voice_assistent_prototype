@@ -8,6 +8,14 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from app.planner.time import to_utc
 
 TaskPeriod = Literal["created_at", "due"]
+RecordSort = Literal[
+    "time_asc", "time_desc", "duration_asc", "duration_desc",
+    "name_asc", "name_desc", "created_asc", "created_desc",
+]
+RECORD_SORTS: tuple[RecordSort, ...] = (
+    "time_asc", "time_desc", "duration_asc", "duration_desc",
+    "name_asc", "name_desc", "created_asc", "created_desc",
+)
 
 
 def local_day_start_utc(day: date, timezone: str) -> datetime:
@@ -38,10 +46,14 @@ class RecordQuery:
     # without one. A date-only deadline belongs to the period when its local midnight does.
     task_period: TaskPeriod = "created_at"
     timezone: str | None = None
+    # None retains the legacy repository order. Explicit ordering is supported by PostgreSQL.
+    sort: RecordSort | None = None
 
     def __post_init__(self) -> None:
         if not self.owner_id.strip():
             raise ValueError("owner_id must not be blank")
+        if self.sort is not None and self.sort not in RECORD_SORTS:
+            raise ValueError("Unsupported sort order")
         if type(self.limit) is not int or not 1 <= self.limit <= 100:
             raise ValueError("limit must be an integer between 1 and 100")
         if type(self.offset) is not int or not 0 <= self.offset <= 10000:
@@ -50,9 +62,9 @@ class RecordQuery:
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(self, name, to_utc(value))
-        if self.start_time is not None and self.end_time is not None:
-            if self.start_time >= self.end_time:
-                raise ValueError("start_time must precede end_time")
+        if (self.start_time is not None and self.end_time is not None
+                and self.start_time >= self.end_time):
+            raise ValueError("start_time must precede end_time")
         if self.task_period not in ("created_at", "due"):
             raise ValueError("task_period must be created_at or due")
         if self.timezone is not None:

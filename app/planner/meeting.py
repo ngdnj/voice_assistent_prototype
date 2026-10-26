@@ -1,6 +1,6 @@
 """Meeting rules independent of transport and storage."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from uuid import UUID, uuid4
 
@@ -37,12 +37,35 @@ class Meeting:
 
 
 def create_meeting(
-    *, owner_id: str, title: str, starts_at: datetime,
-    created_at: datetime, ends_at: datetime | None = None, description: str = "",
+    *,
+    owner_id: str,
+    title: str,
+    starts_at: datetime,
+    created_at: datetime,
+    ends_at: datetime | None = None,
+    description: str = "",
 ) -> Meeting:
     """Create a meeting with explicitly supplied start, optional end and creation time."""
     check_name_length(title, "title")
     return Meeting(
-        owner_id=owner_id, title=title, starts_at=starts_at,
-        ends_at=ends_at, created_at=created_at, description=description,
+        owner_id=owner_id,
+        title=title,
+        starts_at=starts_at,
+        ends_at=ends_at,
+        created_at=created_at,
+        description=description,
     )
+
+
+def move_meeting(
+    meeting: Meeting,
+    *,
+    starts_at: datetime | None = None,
+    ends_at: datetime | None = None,
+) -> Meeting:
+    """Keep the known duration when only the start changes; never invent an end."""
+    start = meeting.starts_at if starts_at is None else to_utc(starts_at)
+    end = None if ends_at is None else to_utc(ends_at)
+    if end is None and meeting.ends_at is not None:
+        end = start + (meeting.ends_at - meeting.starts_at)
+    return replace(meeting, starts_at=start, ends_at=end)

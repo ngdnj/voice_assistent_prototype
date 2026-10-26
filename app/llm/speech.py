@@ -13,6 +13,13 @@ _EMOJI_RE = re.compile("[\U0001f300-\U0001faff☀-➿️]")
 _SPACES_RE = re.compile(r"[ \t]{2,}")
 
 
+def to_chat_text(text: str) -> str:
+    """Keep chat numbering and line breaks; speech cleanup is a separate output boundary."""
+    text = _EMPHASIS_RE.sub("", _HEADING_RE.sub("", text))
+    text = _EMOJI_RE.sub("", text)
+    return "\n".join(_SPACES_RE.sub(" ", line).strip() for line in text.splitlines()).strip()
+
+
 def to_speech_text(text: str) -> str:
     text = _HEADING_RE.sub("", text)
     text = _BULLET_RE.sub("", text)

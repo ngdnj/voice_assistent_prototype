@@ -1,10 +1,11 @@
 """Demo/test storage only: tasks are lost when this instance is discarded."""
 
 from dataclasses import replace
+from datetime import datetime
 from uuid import UUID
 
 from app.planner.operation import CreationOperation, OperationConflictError
-from app.planner.query import MAX_SEARCH_CANDIDATES, QueryTooBroadError, RecordQuery
+from app.planner.query import MAX_SEARCH_CANDIDATES, QueryTooBroadError, RecordQuery, local_day_start_utc
 from app.planner.repository import TaskAlreadyExistsError
 from app.planner.task import Task, TaskStatus
 
@@ -67,4 +68,24 @@ class InMemoryTaskRepository:
             if len(records) > MAX_SEARCH_CANDIDATES:
                 raise QueryTooBroadError("Search exceeds 1000 candidates; narrow the period")
             records = [task for task in records if query.query in task.title.casefold()]
+        if query.sort is not None:
+            records.sort(key=lambda task: task.id)
+            reverse = query.sort.endswith("_desc")
+            if query.sort.startswith("name_"):
+                records.sort(key=lambda task: task.title.lower().replace("ё", "е"), reverse=reverse)
+            elif query.sort.startswith("created_"):
+                records.sort(key=lambda task: task.created_at, reverse=reverse)
+            elif query.sort.startswith("time_"):
+                moments: list[tuple[datetime, Task]] = []
+                for task in records:
+                    moment = task.due_at
+                    if moment is None and task.due_date is not None:
+                        moment = local_day_start_utc(task.due_date, query.timezone or "UTC")
+                    if moment is not None:
+                        moments.append((moment, task))
+                known = {task.id for _, task in moments}
+                records = [task for _, task in sorted(moments, key=lambda pair: pair[0], reverse=reverse)] + [
+                    task for task in records if task.id not in known
+                ]
+            # Tasks have no duration; the UUID order is the stable order for unknown values.
         return records[query.offset : query.offset + query.limit]

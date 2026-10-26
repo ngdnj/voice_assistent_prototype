@@ -75,6 +75,7 @@ strict = true
 ignore_missing_imports = true
 # Role 3 paths; other roles add theirs.
 files = [
+    "app/agent", "app/bot",
     "app/llm", "app/asr", "app/config.py", "app/metrics.py", "evals",
     # Role 4
     "app/storage/postgres",

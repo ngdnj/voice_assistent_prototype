@@ -115,6 +115,8 @@ class RedisReminderRepository:
             raise ReminderStorageError("Stored reminder data is invalid") from None
 
     async def list(self, query: RecordQuery) -> list[Reminder]:
+        if query.sort is not None:
+            raise ValueError("Explicit sort requires the PostgreSQL adapter")
         try:
             members = await read_index(
                 self._client, index_key(self._key_prefix, "reminder", query.owner_id), query
