@@ -44,7 +44,7 @@ bot_started или /start ─▶ приветствие
 сообщение ─▶ дедупликация события ─▶ занято? ─да─▶ «Сейчас обрабатывается ваш предыдущий запрос…»
                                          └нет─▶ блокировка ─▶ «Принял запрос, обрабатываю…» ─▶ фоновая обработка
 фоновая обработка: текст ─────────────────────────────────▶ Backend.answer ─▶ ответ пользователю
-                   голос ─▶ загрузка ─▶ ASR ─▶ «Распознано: …» ─▶ Backend.answer ─▶ ответ пользователю
+                   голос ─▶ загрузка ─▶ ASR ─────────────────▶ Backend.answer ─▶ ответ пользователю
                    в любом исходе ─▶ снятие блокировки
 ```
 
@@ -57,6 +57,13 @@ bot_started или /start ─▶ приветствие
 - Владелец — `owner_id = str(sender.user_id)`, ответ уходит в `recipient.chat_id`. Сообщения ботов
   и записи каналов без отправителя игнорируются.
 - Подтверждение создания формирует backend по результату инструмента; бот отправляет его текст как есть.
+- Ответ backend может быть `Reply(text, buttons)`: кнопки-callback в одну строку под последним сообщением.
+  Кнопки «Да, все верно» (`confirm:yes`, пока без действия, нажатие только подтверждается через
+  `POST /answers`) и «Нет» (`confirm:no` → «Повторите запрос.», следующее сообщение — обычный новый запрос)
+  готовы в `CONFIRM_BUTTONS`. Демо-backend удалён (v2), `AgentBackend` сейчас возвращает текст без кнопок.
+- Обычный ответ или ошибка заменяют сообщение «Принял запрос, обрабатываю…» (`edit_text`, см. v2.2).
+  Ответ с кнопками приходит новым сообщением, а статус удаляется (`DELETE /messages`).
+  Отдельного сообщения «Распознано: …» больше нет.
   Ошибка или пустой ответ backend — честное «Не получилось обработать запрос…».
 
 ## 2. Модули
@@ -175,6 +182,7 @@ MAX_BOT_TOKEN=<токен тестового бота> uv run --locked --env-fil
 uv run --locked --env-file .env python -m app.bot webhook            # 127.0.0.1:8080, POST /max/webhook, GET /health
 uv run --locked --env-file .env python -m app.bot subscribe --url https://<туннель>/max/webhook
 uv run --locked --env-file .env python -m app.bot subscriptions      # список подписанных URL
+uv run --locked --env-file .env python -m app.bot doctor             # проверка цепочки по шагам: секрет, Redis, токен, подписка, сервер, туннель, пробное событие
 uv run --locked --env-file .env python -m app.bot unsubscribe --url https://<туннель>/max/webhook
 ```
 
@@ -210,7 +218,7 @@ uv run --locked --env-file .env python -m app.bot unsubscribe --url https://<т�
 | `MAX_CA_BUNDLE_FILE` | пусто | дополнительный PEM-сертификат к публичным УЦ (сертификат Минцифры, если MAX его использует) |
 | `MAX_WEBHOOK_SECRET` | пусто | 5–256 символов `[A-Za-z0-9_-]`; обязателен для webhook |
 | `MAX_DEFAULT_TIMEZONE` | `Europe/Moscow` | явная настройка продукта, пока зона не хранится в профиле |
-| `MAX_AUDIO_HOSTS` | `max.ru` | суффиксы хостов для загрузки аудио, через запятую |
+| `MAX_AUDIO_HOSTS` | `max.ru,oneme.ru` | суффиксы хостов для загрузки аудио, через запятую |
 | `MAX_AUDIO_MAX_BYTES` | `10485760` | лимит размера аудио |
 | `MAX_SEND_TIMEOUT_S` | `10` | таймаут одного HTTP-вызова MAX, ≤ 20 |
 | `BOT_PROCESSING_TIMEOUT_S` | `120` | предел ASR + backend на один запрос |
@@ -270,3 +278,7 @@ uv run --locked --env-file .env python -m app.bot unsubscribe --url https://<т�
 | v2.1 | 2026-10-26 | Polling отказывается запускаться при активном webhook (polling_blocked_by_webhook), подписку автоматически не удаляет. Startup-событие помечает backend=agent. |
 
 | v2.2 | 2026-10-26 | `Sender.edit_text`, финальный ответ/уточнение/ошибка заменяют статус по message_id; безопасный fallback отправки, метрики purpose=edit. |
+| v2.3 | 2026-10-26 | Команда `doctor` для диагностики webhook-цепочки; лог `webhook_received`; расширенные причины ошибок аудио и ASR |
+| v2.4 | 2026-10-26 | Выбран GigaAM: `python -m app.bot` загружает модель в фоне при старте (`asr_warm_up_started` / `_finished` / `_failed`); запуск с `--extra asr` |
+| v2.5 | 2026-10-26 | По реальному событию: голосовые MAX отдаёт с `a.oneme.ru`, домен `oneme.ru` разрешён по умолчанию |
+| v2.6 | 2026-10-26 | `Backend.answer` возвращает `str` или `Reply(text, buttons)`; статус «Принял запрос…» удаляется после ответа с кнопками (обычный ответ по-прежнему заменяет статус, v2.2); сообщение «Распознано» убрано; кнопки-callback «Да, все верно» / «Нет» (`confirm:yes` / `confirm:no`), событие `message_callback` (нужна переподписка), «Нет» → «Повторите запрос.» |

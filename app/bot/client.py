@@ -98,6 +98,14 @@ def split_text(text: str, limit: int = MAX_TEXT_LENGTH) -> list[str]:
     return parts
 
 
+def _message_body(text: str, buttons: tuple[tuple[str, str], ...]) -> dict[str, object]:
+    body: dict[str, object] = {"text": text}
+    if buttons:
+        row = [{"type": "callback", "text": label, "payload": payload} for label, payload in buttons]
+        body["attachments"] = [{"type": "inline_keyboard", "payload": {"buttons": [row]}}]
+    return body
+
+
 def _message_id(payload: object) -> str:
     if isinstance(payload, dict):
         message = payload.get("message")
@@ -163,24 +171,59 @@ class MaxClient:
         await self._http.aclose()
         await self._media.aclose()
 
-    async def send_text(self, *, chat_id: str, text: str) -> SendResult:
-        """Send one message (split if needed). Retries 429/5xx; a timeout is `unknown`, not failure."""
+    async def send_text(
+        self, *, chat_id: str, text: str, buttons: tuple[tuple[str, str], ...] = ()
+    ) -> SendResult:
+        """Send one message (split if needed). Retries 429/5xx; a timeout is `unknown`, not failure.
+
+        `buttons` are (text, payload) callback buttons in one row, attached to the last part.
+        """
         if not text.strip():
             return SendResult("permanent_failure", error_code="empty_text")
         result = SendResult("permanent_failure", error_code="empty_text")
-        for part in split_text(text):
-            result = await self._send_part(chat_id=chat_id, text=part)
+        parts = split_text(text)
+        for index, part in enumerate(parts):
+            last = index == len(parts) - 1
+            result = await self._send_part(chat_id=chat_id, text=part, buttons=buttons if last else ())
             if not result.ok:
                 return result
         return result
 
-    async def _send_part(self, *, chat_id: str, text: str) -> SendResult:
+    async def delete_message(self, *, message_id: str) -> str:
+        """DELETE /messages: "" on success, else a short safe code. Bots delete only own messages."""
+        return await self._simple_call("DELETE", "/messages", params={"message_id": message_id})
+
+    async def answer_callback(self, *, callback_id: str) -> str:
+        """POST /answers without a body: acknowledges the button press and changes nothing."""
+        return await self._simple_call("POST", "/answers", params={"callback_id": callback_id}, json={})
+
+    async def _simple_call(
+        self, method: str, path: str, *, params: dict[str, str], json: object = None
+    ) -> str:
+        try:
+            response = await self._http.request(method, path, params=params, json=json)
+        except httpx.TransportError as error:
+            return transport_error_code(error)
+        if response.status_code != 200:
+            return f"http_{response.status_code}"
+        try:
+            payload = response.json()
+        except ValueError:
+            return "invalid_json"
+        # MAX answers 200 with success=false and a reason for refused operations.
+        if isinstance(payload, dict) and payload.get("success") is False:
+            return "rejected"
+        return ""
+
+    async def _send_part(
+        self, *, chat_id: str, text: str, buttons: tuple[tuple[str, str], ...] = ()
+    ) -> SendResult:
         delay = RETRY_DELAY_S
         result = SendResult("retryable_failure", error_code="not_sent")
         for attempt in range(SEND_ATTEMPTS):
             try:
                 response = await self._http.post(
-                    "/messages", params={"chat_id": chat_id}, json={"text": text}
+                    "/messages", params={"chat_id": chat_id}, json=_message_body(text, buttons)
                 )
             except httpx.TimeoutException:
                 # The request may have reached MAX: repeating it risks a duplicate message.
@@ -267,8 +310,11 @@ class MaxClient:
                     if not size:
                         raise AudioFetchError("Audio download returned no data")
                     return b"".join(chunks)
+            except httpx.TransportError as error:
+                code = transport_error_code(error)
+                raise AudioFetchError(f"Audio download failed: {code}") from None
             except httpx.HTTPError:
-                raise AudioFetchError("Audio download failed: network error") from None
+                raise AudioFetchError("Audio download failed: http_error") from None
         raise AudioSourceError("Too many audio redirects")
 
     async def get_updates(
@@ -328,6 +374,14 @@ class MaxClient:
 
     async def unsubscribe(self, *, url: str) -> None:
         self._check_success(await self._subscriptions_call("DELETE", params={"url": url}), "DELETE")
+
+    async def check_token(self) -> str:
+        """GET /me: "" if the token works, otherwise a short safe error code."""
+        try:
+            response = await self._http.get("/me")
+        except httpx.TransportError as error:
+            return transport_error_code(error)
+        return "" if response.status_code == 200 else f"http_{response.status_code}"
 
     async def list_subscriptions(self) -> list[str]:
         """Only the subscribed URLs: other fields are not needed and are not printed."""

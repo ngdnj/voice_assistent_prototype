@@ -17,6 +17,8 @@ htmlcov/
 .env.*
 !.env.example
 certs/
+# Role 2: local CA bundle for MAX (MAX_CA_BUNDLE_FILE)
+russian_trusted_root_ca.pem
 
 # Local data and reports
 data/

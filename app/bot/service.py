@@ -22,6 +22,7 @@ from app.bot.gate import Gate
 from app.bot.updates import (
     BotEvent,
     BotStarted,
+    CallbackPressed,
     Ignored,
     IncomingMessage,
     MessageCreated,
@@ -32,8 +33,33 @@ from app.bot.updates import (
 LOGGER = logging.getLogger("it_gorky.bot")
 
 Outcome = Literal[
-    "accepted", "busy", "welcomed", "unsupported", "invalid_input", "duplicate", "ignored", "rejected"
+    "accepted",
+    "busy",
+    "welcomed",
+    "unsupported",
+    "invalid_input",
+    "duplicate",
+    "ignored",
+    "rejected",
+    "confirmed",
+    "repeat_requested",
 ]
+
+Buttons = tuple[tuple[str, str], ...]  # (button text, callback payload), one row
+
+# "Is that right?" keyboard under the demo reply; "yes" has no action yet.
+CONFIRM_BUTTONS: Buttons = (
+    (messages.CONFIRM_YES_TEXT, messages.CONFIRM_YES),
+    (messages.CONFIRM_NO_TEXT, messages.CONFIRM_NO),
+)
+
+
+@dataclass(frozen=True)
+class Reply:
+    """A reply with optional callback buttons; a plain `str` from the backend means no buttons."""
+
+    text: str
+    buttons: Buttons = ()
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -50,13 +76,15 @@ class BackendRequest:
 
 
 class Backend(Protocol):
-    async def answer(self, request: BackendRequest) -> str:
-        """Return the reply text for the user; raise on failure (the bot answers FAILED)."""
+    async def answer(self, request: BackendRequest) -> str | Reply:
+        """Return the reply for the user; raise on failure (the bot answers FAILED)."""
         ...
 
 
 class Sender(Protocol):
-    async def send_text(self, *, chat_id: str, text: str) -> SendResult: ...
+    async def send_text(self, *, chat_id: str, text: str, buttons: Buttons = ()) -> SendResult: ...
+    async def delete_message(self, *, message_id: str) -> str: ...
+    async def answer_callback(self, *, callback_id: str) -> str: ...
 
     async def edit_text(self, *, message_id: str, text: str) -> SendResult: ...
 
@@ -146,6 +174,8 @@ class BotService:
             return "ignored"
         if isinstance(event, BotStarted):
             kind, event_id = "start", event.event_id
+        elif isinstance(event, CallbackPressed):
+            kind, event_id = "callback", f"max:callback:{event.callback_id}"
         else:
             kind = "audio" if event.audio is not None else "text" if event.text is not None else "other"
             event_id = f"max:message:{event.message_id}"
@@ -168,9 +198,11 @@ class BotService:
         except Exception:
             log_event("dedup_forget_failed")
 
-    async def _dispatch(self, event: BotStarted | MessageCreated) -> Outcome:
+    async def _dispatch(self, event: BotStarted | MessageCreated | CallbackPressed) -> Outcome:
         if isinstance(event, BotStarted):
             return await self._welcome(event.owner_id, event.chat_id)
+        if isinstance(event, CallbackPressed):
+            return await self._callback(event)
         if event.text is not None and event.text.strip().lower() in messages.START_COMMANDS:
             return await self._welcome(event.owner_id, event.chat_id)
         if event.text is not None and not has_meaningful_text(event.text):
@@ -207,6 +239,25 @@ class BotService:
         log_event("accepted", request_id=incoming.request_id, job_id=job_id)
         return "accepted"
 
+    async def _callback(self, event: CallbackPressed) -> Outcome:
+        # Acknowledge every press so the client stops waiting; the answer changes nothing.
+        code = await self._sender.answer_callback(callback_id=event.callback_id)
+        if code:
+            log_event("callback_answer_failed", error_code=code)
+        if event.payload == messages.CONFIRM_YES:
+            return "confirmed"  # No action yet: confirmation is wired to the backend later.
+        if event.payload != messages.CONFIRM_NO:
+            return "ignored"
+        if event.chat_id is None:
+            log_event("callback_without_chat")
+            return "ignored"
+        if await self._gate.is_busy(event.owner_id):
+            await self._send(event.chat_id, messages.BUSY, "busy")
+            return "busy"
+        # The next message is an ordinary new request: no special state is needed to wait for it.
+        await self._send(event.chat_id, messages.REPEAT_REQUEST, "repeat")
+        return "repeat_requested"
+
     async def _welcome(self, owner_id: str, chat_id: str) -> Outcome:
         # "Other functions" are unavailable while a request is processed, including the greeting.
         if await self._gate.is_busy(owner_id):
@@ -215,9 +266,9 @@ class BotService:
         await self._send(chat_id, messages.WELCOME, "welcome")
         return "welcomed"
 
-    async def _send(self, chat_id: str, text: str, purpose: str) -> SendResult:
+    async def _send(self, chat_id: str, text: str, purpose: str, buttons: Buttons = ()) -> SendResult:
         started = time.monotonic()
-        result = await self._sender.send_text(chat_id=chat_id, text=text)
+        result = await self._sender.send_text(chat_id=chat_id, text=text, buttons=buttons)
         metrics.SEND_SECONDS.labels(purpose).observe(time.monotonic() - started)
         metrics.SENDS.labels(purpose, result.outcome).inc()
         if not result.ok:
@@ -248,9 +299,17 @@ class BotService:
         # Missing status ID or rejected edit: preserve the answer via an ordinary send.
         await self._send(chat_id, text, purpose)
 
+    async def _reply_with_buttons(self, chat_id: str, status_id: str, reply: Reply, purpose: str) -> None:
+        """Send a reply with callback buttons as a new message, then remove the status message."""
+        await self._send(chat_id, reply.text, purpose, reply.buttons)
+        if status_id:
+            code = await self._sender.delete_message(message_id=status_id)
+            if code:
+                log_event("status_delete_failed", error_code=code)
+
     async def _process(self, incoming: IncomingMessage, job_id: str, status_id: str = "") -> None:
         ids: dict[str, str | UUID] = {"request_id": incoming.request_id, "job_id": job_id}
-        reply: str | None = None
+        reply: str | Reply | None = None
         outcome = "failed"
         try:
             try:
@@ -261,6 +320,14 @@ class BotService:
             except Exception:
                 reply, outcome = messages.FAILED, "failed"
             log_event(f"processing_{outcome}", **ids)
+            # Replies with buttons cannot be produced by editing the status: send them separately.
+            if isinstance(reply, Reply):
+                if reply.buttons:
+                    purpose = "reply" if outcome == "replied" else "error"
+                    await self._reply_with_buttons(incoming.chat_id, status_id, reply, purpose)
+                    reply = None
+                else:
+                    reply = reply.text
             if reply:
                 await self._finish_reply(
                     incoming.chat_id, status_id, reply, "reply" if outcome == "replied" else "error"
@@ -273,13 +340,12 @@ class BotService:
             metrics.PROCESSING.labels(outcome).inc()
             await asyncio.shield(self._release(incoming.owner_id, job_id))
 
-    async def _prepare_reply(self, incoming: IncomingMessage, job_id: str) -> tuple[str, str]:
+    async def _prepare_reply(self, incoming: IncomingMessage, job_id: str) -> tuple[str | Reply, str]:
         text = incoming.text
         if incoming.audio_ref is not None:
             recognized, outcome = await self._recognize(incoming)
             if recognized is None:
                 return outcome
-            await self._send(incoming.chat_id, messages.TRANSCRIPT.format(text=recognized), "transcript")
             text = recognized
         if text is None:
             raise ValueError("Message has no text to process")
@@ -294,7 +360,7 @@ class BotService:
                 timezone=incoming.timezone,
             )
         )
-        if not reply.strip():
+        if not (reply.text if isinstance(reply, Reply) else reply).strip():
             return messages.FAILED, "failed"
         return reply, "replied"
 

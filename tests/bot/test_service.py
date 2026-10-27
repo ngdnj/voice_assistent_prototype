@@ -6,8 +6,8 @@ from app.asr.audio import AudioDecodeError
 from app.asr.base import AsrError, AudioTooLongError
 from app.bot import messages
 from app.bot.client import AudioFetchError, AudioSourceError, AudioTooLargeError, SendResult
-from app.bot.service import BackgroundRunner
-from app.bot.updates import AudioRef, BotStarted, Ignored, MessageCreated
+from app.bot.service import CONFIRM_BUTTONS, BackendRequest, BackgroundRunner, Reply
+from app.bot.updates import AudioRef, BotStarted, CallbackPressed, Ignored, MessageCreated
 from tests.bot.fakes import (
     NOW,
     Collect,
@@ -57,13 +57,12 @@ async def test_text_goes_to_backend_and_reply_is_shown() -> None:
     assert not gate.locks  # type: ignore[attr-defined]
 
 
-async def test_voice_goes_through_asr_and_transcript_is_shown() -> None:
+async def test_voice_goes_through_asr_without_transcript_message() -> None:
     bot, parts = build_bot()
     await bot.handle(VOICE)
     await parts["submit"].drain()  # type: ignore[attr-defined]
     assert parts["sender"].texts == [  # type: ignore[attr-defined]
         messages.ACCEPTED,
-        "Распознано: напомни завтра позвонить Ивану",
         "Записал задачу «Отчёт»",
     ]
     assert parts["recognizer"].calls == [(b"OggS-audio", ".ogg")]  # type: ignore[attr-defined]
@@ -313,7 +312,6 @@ async def test_max_transcription_is_used_without_our_asr() -> None:
     ref = AudioRef(url="https://media.max.ru/a.ogg", suffix=".ogg", transcription="позвони маме")
     await bot.handle(voice(ref))
     await parts["submit"].drain()  # type: ignore[attr-defined]
-    assert parts["sender"].texts[1] == "Распознано: позвони маме"  # type: ignore[attr-defined]
     assert parts["backend"].requests[0].text == "позвони маме"  # type: ignore[attr-defined]
     assert parts["audio"].urls == []  # type: ignore[attr-defined]
 
@@ -350,3 +348,76 @@ async def test_limits_are_not_bypassed_by_transcription() -> None:
     await parts["submit"].drain()  # type: ignore[attr-defined]
     assert parts["sender"].texts[-1] == messages.AUDIO_TOO_LARGE  # type: ignore[attr-defined]
     assert not parts["backend"].requests  # type: ignore[attr-defined]
+
+
+class ConfirmBackend(FakeBackend):
+    async def answer(self, request: BackendRequest) -> Reply:  # type: ignore[override]
+        return Reply(f"Ответ на: {request.text}", CONFIRM_BUTTONS)
+
+
+async def test_plain_reply_keeps_status_without_deleting() -> None:
+    bot, parts = build_bot()
+    await bot.handle(TEXT)
+    await parts["submit"].drain()  # type: ignore[attr-defined]
+    assert parts["sender"].deleted == []  # type: ignore[attr-defined]
+
+
+async def test_reply_with_buttons_is_sent_and_status_deleted() -> None:
+    bot, parts = build_bot(backend=ConfirmBackend())
+    await bot.handle(TEXT)
+    await parts["submit"].drain()  # type: ignore[attr-defined]
+    sender = parts["sender"]
+    assert sender.edited == []  # type: ignore[attr-defined]
+    assert sender.texts[-1] == "Ответ на: Создай задачу отчёт"  # type: ignore[attr-defined]
+    assert sender.buttons[-1] == (("Да, все верно", "confirm:yes"), ("Нет", "confirm:no"))  # type: ignore[attr-defined]
+    assert sender.buttons[0] == ()  # type: ignore[attr-defined]
+    assert sender.deleted == ["mid.1"]  # type: ignore[attr-defined]
+
+
+async def test_reply_with_buttons_without_status_id_deletes_nothing() -> None:
+    sender = FakeSender()
+    sender.result = SendResult("delivered", external_message_id="")
+    bot, parts = build_bot(sender=sender, backend=ConfirmBackend())
+    await bot.handle(TEXT)
+    await parts["submit"].drain()  # type: ignore[attr-defined]
+    assert sender.deleted == []
+    assert sender.buttons[-1] == CONFIRM_BUTTONS
+
+
+def press(payload: str, callback_id: str = "cb.1", chat_id: str | None = "777") -> CallbackPressed:
+    return CallbackPressed(callback_id=callback_id, payload=payload, owner_id="42", chat_id=chat_id)
+
+
+async def test_yes_button_does_nothing_but_is_acknowledged() -> None:
+    bot, parts = build_bot()
+    assert await bot.handle(press(messages.CONFIRM_YES)) == "confirmed"
+    assert parts["sender"].texts == []  # type: ignore[attr-defined]
+    assert parts["sender"].answered == ["cb.1"]  # type: ignore[attr-defined]
+    assert not parts["backend"].requests  # type: ignore[attr-defined]
+
+
+async def test_no_button_asks_to_repeat_and_next_message_is_a_new_request() -> None:
+    bot, parts = build_bot()
+    assert await bot.handle(press(messages.CONFIRM_NO)) == "repeat_requested"
+    assert parts["sender"].texts == [messages.REPEAT_REQUEST]  # type: ignore[attr-defined]
+    assert not parts["gate"].locks  # type: ignore[attr-defined]
+    assert await bot.handle(TEXT) == "accepted"
+    await parts["submit"].drain()  # type: ignore[attr-defined]
+
+
+async def test_no_button_while_busy_and_repeated_press() -> None:
+    backend = FakeBackend()
+    backend.release.clear()
+    bot, parts = build_bot(backend=backend)
+    await bot.handle(TEXT)
+    assert await bot.handle(press(messages.CONFIRM_NO, "cb.2")) == "busy"
+    assert await bot.handle(press(messages.CONFIRM_NO, "cb.2")) == "duplicate"
+    backend.release.set()
+    await parts["submit"].drain()  # type: ignore[attr-defined]
+
+
+async def test_unknown_payload_and_missing_chat_are_ignored() -> None:
+    bot, parts = build_bot()
+    assert await bot.handle(press("other")) == "ignored"
+    assert await bot.handle(press(messages.CONFIRM_NO, "cb.3", chat_id=None)) == "ignored"
+    assert parts["sender"].texts == []  # type: ignore[attr-defined]

@@ -18,16 +18,30 @@ class FakeSender:
         self.actions: list[str] = []
         self.edit_result = SendResult("delivered", external_message_id="mid.1")
         self.result = SendResult("delivered", external_message_id="mid.1")
+        self.buttons: list[tuple[tuple[str, str], ...]] = []
+        self.deleted: list[str] = []
+        self.answered: list[str] = []
 
-    async def send_text(self, *, chat_id: str, text: str) -> SendResult:
+    async def send_text(
+        self, *, chat_id: str, text: str, buttons: tuple[tuple[str, str], ...] = ()
+    ) -> SendResult:
         self.sent.append((chat_id, text))
         self.actions.append(text)
+        self.buttons.append(buttons)
         return self.result
 
     async def edit_text(self, *, message_id: str, text: str) -> SendResult:
         self.edited.append((message_id, text))
         self.actions.append(text)
         return self.edit_result
+
+    async def delete_message(self, *, message_id: str) -> str:
+        self.deleted.append(message_id)
+        return ""
+
+    async def answer_callback(self, *, callback_id: str) -> str:
+        self.answered.append(callback_id)
+        return ""
 
     @property
     def texts(self) -> list[str]:
