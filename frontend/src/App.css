@@ -87,4 +87,31 @@ select {
   text-align: center;
   color: #888;
   margin-top: 40px;
+
+.period {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: center;
+  margin-bottom: 16px;
+  color: #ccc;
+}
+
+.period input {
+  background: #2a2a2a;
+  color: #f1f1f1;
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 6px;
+}
+
+.status-message {
+  text-align: center;
+  color: #888;
+  margin-top: 30px;
+}
+
+.status-error {
+  color: #ff6b6b;
+}
 }
