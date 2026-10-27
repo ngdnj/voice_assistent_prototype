@@ -184,7 +184,23 @@ class MaxClient:
         parts = split_text(text)
         for index, part in enumerate(parts):
             last = index == len(parts) - 1
-            result = await self._send_part(chat_id=chat_id, text=part, buttons=buttons if last else ())
+            result = await self._send_part(
+                params={"chat_id": chat_id}, text=part, buttons=buttons if last else ()
+            )
+            if not result.ok:
+                return result
+        return result
+
+    async def send_to_user(self, *, user_id: str, text: str) -> SendResult:
+        """Send to a user's dialog by MAX user_id (POST /messages?user_id=), e.g. a reminder.
+
+        Used when no incoming message gave a chat_id. Same retries and outcomes as `send_text`.
+        """
+        if not text.strip():
+            return SendResult("permanent_failure", error_code="empty_text")
+        result = SendResult("permanent_failure", error_code="empty_text")
+        for part in split_text(text):
+            result = await self._send_part(params={"user_id": user_id}, text=part)
             if not result.ok:
                 return result
         return result
@@ -216,14 +232,14 @@ class MaxClient:
         return ""
 
     async def _send_part(
-        self, *, chat_id: str, text: str, buttons: tuple[tuple[str, str], ...] = ()
+        self, *, params: Mapping[str, str], text: str, buttons: tuple[tuple[str, str], ...] = ()
     ) -> SendResult:
         delay = RETRY_DELAY_S
         result = SendResult("retryable_failure", error_code="not_sent")
         for attempt in range(SEND_ATTEMPTS):
             try:
                 response = await self._http.post(
-                    "/messages", params={"chat_id": chat_id}, json=_message_body(text, buttons)
+                    "/messages", params=dict(params), json=_message_body(text, buttons)
                 )
             except httpx.TimeoutException:
                 # The request may have reached MAX: repeating it risks a duplicate message.

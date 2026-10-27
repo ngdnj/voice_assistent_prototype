@@ -426,3 +426,20 @@ async def test_refused_delete_is_reported() -> None:
     max_client = MaxClient(settings(), transport=httpx.MockTransport(lambda request: response))
     assert await max_client.delete_message(message_id="m") == "rejected"
     await max_client.aclose()
+
+
+async def test_send_to_user_addresses_user_id_not_chat() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"message": {"body": {"mid": "mid.7", "text": "ok"}}})
+
+    max_client = MaxClient(settings(), transport=httpx.MockTransport(handler))
+    result = await max_client.send_to_user(user_id="42", text="🔔 Напоминание: позвонить")
+    empty = await max_client.send_to_user(user_id="42", text="  ")
+    await max_client.aclose()
+    assert result.ok and result.external_message_id == "mid.7"
+    assert len(seen) == 1
+    assert dict(seen[0].url.params) == {"user_id": "42"}
+    assert empty.outcome == "permanent_failure"
