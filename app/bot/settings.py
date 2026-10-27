@@ -27,7 +27,8 @@ class BotSettings:
     # Explicit product setting until user profiles store a zone (root AGENTS §7).
     default_timezone: str = "Europe/Moscow"
     # Host suffixes the bot may download audio from; checked for every URL and redirect.
-    audio_hosts: tuple[str, ...] = ("max.ru",)
+    # MAX serves voice messages from a.oneme.ru (checked on a real event, INTEGRATION v2.5).
+    audio_hosts: tuple[str, ...] = ("max.ru", "oneme.ru")
     audio_max_bytes: int = 10 * 1024 * 1024
     send_timeout_s: float = 10.0
     processing_timeout_s: float = 120.0
@@ -75,7 +76,7 @@ class BotSettings:
 
     @classmethod
     def from_env(cls) -> "BotSettings":
-        hosts = os.environ.get("MAX_AUDIO_HOSTS", "max.ru")
+        hosts = os.environ.get("MAX_AUDIO_HOSTS", "max.ru,oneme.ru")
         return cls(
             token=os.environ.get("MAX_BOT_TOKEN", ""),
             api_url=os.environ.get("MAX_API_URL", DEFAULT_API_URL).rstrip("/"),

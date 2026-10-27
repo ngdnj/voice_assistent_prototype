@@ -1,6 +1,6 @@
 # Интеграция с ролью 2: MAX bot
 
-> **Статус: v2.7 — напоминания приходят в MAX** (`app/bot/`, локальный запуск `python -m app.bot`).
+> **Статус: v2.8 — напоминания приходят в MAX** (`app/bot/`, локальный запуск `python -m app.bot`).
 > Потребитель потока уведомлений реализован (раздел 6); публикацию напоминаний пока делает
 > временный планировщик бота до появления dispatcher роли 1. Изменения — только через журнал версий.
 
@@ -183,7 +183,8 @@ MAX_BOT_TOKEN=<токен тестового бота> uv run --locked --env-fil
 
 ```bash
 # 1. MAX_WEBHOOK_SECRET=<5–256 символов [A-Za-z0-9_-]> в .env
-# 2. HTTPS-туннель на локальный порт, например: cloudflared tunnel --url http://localhost:8080
+# 2. HTTPS-туннель на локальный порт: cloudflared tunnel --url http://127.0.0.1:8080
+#    (не localhost: на Windows он разрешается в ::1, и туннель не достучится до сервера)
 uv run --locked --env-file .env python -m app.bot webhook            # 127.0.0.1:8080, POST /max/webhook, GET /health
 uv run --locked --env-file .env python -m app.bot subscribe --url https://<туннель>/max/webhook
 uv run --locked --env-file .env python -m app.bot subscriptions      # список подписанных URL
@@ -193,7 +194,8 @@ uv run --locked --env-file .env python -m app.bot unsubscribe --url https://<т�
 
   Это стенд разработки на `build_webhook_app` (тот же `webhook_router` и `BotService`), не целевой API:
   в рабочей системе маршрут монтирует роль 1. Подписка: `POST /subscriptions` с `url`,
-  `update_types: ["bot_started", "message_created"]`, `secret`; удаление — `DELETE /subscriptions?url=`.
+  `update_types: ["bot_started", "message_created", "message_callback"]`, `secret`;
+  удаление — `DELETE /subscriptions?url=`. После добавления нового типа события нужна переподписка.
   MAX требует порт 443 без порта в URL и доверенный сертификат. Ctrl+C/SIGTERM останавливает приём,
   ждёт активные запросы до 10 с и снимает блокировки. Сервер uvicorn приходит транзитивно (через fastmcp).
 
@@ -282,6 +284,8 @@ PostgreSQL events (reminder, scheduled_at наступил) ─▶ ReminderSched
 
 - `POST /messages?chat_id=<id>`, тело `{"text": ...}`, до 4000 символов; длинный ответ делится по строкам/словам.
   Уведомления без входящего сообщения — `POST /messages?user_id=<id>` (`send_to_user`), с теми же повторами.
+- Отправки одному адресату (`chat_id` или `user_id`) идут не чаще одной в 0,5 с (`MIN_SEND_INTERVAL_S`),
+  в том числе повторы; разные адресаты друг друга не ждут. Ограничение действует в пределах процесса.
 - 429, 5xx и сетевые ошибки — до 3 попыток с задержкой 1 и 2 с (лимит MAX — 2 сообщения в секунду на диалог).
   Остальные 4xx не повторяются. Таймаут — исход `unknown` без повтора: запрос мог дойти, повтор дал бы дубль.
 - Неудачная отправка статуса не останавливает обработку; итог отражается в метриках и логах без текста.
@@ -291,8 +295,8 @@ PostgreSQL events (reminder, scheduled_at наступил) ─▶ ReminderSched
 | Вопрос | Что сделано / с кем |
 | --- | --- |
 | Поля `Message.body` (`mid`, `text`, `attachments`), `Recipient.chat_id`, `payload.url` аудио: страницы объектов не открылись | Текст подтверждён ручной проверкой. При расхождении событие не обрабатывается, причина — в логе `polling_invalid_update` / `webhook_invalid` (`reason`) |
-| Нативные голосовые приходят без `message` | Ограничение MAX, исправить на нашей стороне нельзя. Обходные пути: аудиофайл вместо голосового, другая версия приложения MAX |
-| Хосты, с которых MAX отдаёт аудио | По умолчанию `max.ru`; если реальный URL на другом домене, загрузка даст «Не удалось прочитать запись» — домен добавляется в `MAX_AUDIO_HOSTS` после проверки |
+| Нативные голосовые приходят без `message` | Только при long polling (ограничение MAX). Через webhook голосовые приходят полностью — поэтому основной режим webhook (v1.4) |
+| Хосты, с которых MAX отдаёт аудио | Проверено на реальном событии: `a.oneme.ru`. По умолчанию разрешены `max.ru` и `oneme.ru`; новый домен добавляется в `MAX_AUDIO_HOSTS` после проверки (событие `audio_source_rejected`) |
 | Повторная выдача пакета `GET /updates` при прежнем `marker` | Polling подтверждает пакет только после обработки; повтор безопасен благодаря дедупликации |
 | Ключ `bot:busy` и состояния `processing` / `awaiting_clarification` роли 1 | Блокировка бота снимается после ответа, поэтому ответ на уточнение принимается. Объединить с ключами роли 1 при появлении worker |
 | Где хранится `timezone` пользователя | Сейчас `MAX_DEFAULT_TIMEZONE`; нужен профиль — роль 1 |
@@ -320,3 +324,4 @@ PostgreSQL events (reminder, scheduled_at наступил) ─▶ ReminderSched
 | v2.5 | 2026-10-26 | По реальному событию: голосовые MAX отдаёт с `a.oneme.ru`, домен `oneme.ru` разрешён по умолчанию |
 | v2.6 | 2026-10-26 | `Backend.answer` возвращает `str` или `Reply(text, buttons)`; статус «Принял запрос…» удаляется после ответа с кнопками (обычный ответ по-прежнему заменяет статус, v2.2); сообщение «Распознано» убрано; кнопки-callback «Да, все верно» / «Нет» (`confirm:yes` / `confirm:no`), событие `message_callback` (нужна переподписка), «Нет» → «Повторите запрос.» |
 | v2.7 | 2026-10-27 | Напоминания: `DeliveryConsumer` (поток `max-delivery-v1` → `POST /messages?user_id=`), `MaxClient.send_to_user`, временный `ReminderScheduler` (PostgreSQL только чтение, ключ `bot:reminder`), запуск вместе с ботом и флаг `--no-reminders`, метрики доставки. Контракт `docs/notification-stream.md` не менялся |
+| v2.8 | 2026-10-27 | Без изменения контракта: `oneme.ru` снова разрешён по умолчанию (терялся при слиянии); отправки одному адресату не чаще одной в 0,5 с; тесты сбоя записи результата доставки и отсутствия текстов и секретов в логах; уточнены подписка (`message_callback`), команда туннеля и открытые вопросы |
