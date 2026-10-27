@@ -88,6 +88,70 @@ async def test_timeout_is_unknown_and_not_repeated() -> None:
     assert (result.outcome, count) == ("unknown", 1)
 
 
+async def test_edit_uses_message_id_and_checks_boolean_success() -> None:
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={"success": True})
+
+    max_client = MaxClient(settings(), transport=httpx.MockTransport(handler))
+    try:
+        result = await max_client.edit_text(message_id="mid.status", text="Встреча перенесена")
+        assert result.ok and result.external_message_id == "mid.status"
+        assert seen[0].method == "PUT"
+        assert dict(seen[0].url.params) == {"message_id": "mid.status"}
+        assert seen[0].headers["Authorization"] == TOKEN
+        assert json.loads(seen[0].content) == {"text": "Встреча перенесена"}
+    finally:
+        await max_client.aclose()
+
+
+@pytest.mark.parametrize("payload", [{"success": False}, {}, {"success": "true"}])
+async def test_edit_does_not_claim_success_on_http_200_without_confirmation(payload) -> None:
+    max_client = MaxClient(
+        settings(), transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
+    )
+    try:
+        assert not (await max_client.edit_text(message_id="mid.status", text="Ответ")).ok
+    finally:
+        await max_client.aclose()
+
+
+async def test_edit_timeout_retries_same_target_safely() -> None:
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if len(requests) == 1:
+            raise httpx.ReadTimeout("slow", request=request)
+        return httpx.Response(200, json={"success": True})
+
+    max_client = MaxClient(settings(), transport=httpx.MockTransport(handler))
+    try:
+        assert (await max_client.edit_text(message_id="mid.status", text="Ответ")).ok
+        assert len(requests) == 2
+        assert requests[0].url == requests[1].url and requests[0].content == requests[1].content
+    finally:
+        await max_client.aclose()
+
+
+@pytest.mark.parametrize("status, calls", [(429, 3), (503, 3), (403, 1)])
+async def test_edit_http_failures_are_bounded(status, calls):
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(status, json={})
+
+    max_client = MaxClient(settings(), transport=httpx.MockTransport(handler))
+    try:
+        result = await max_client.edit_text(message_id="mid.status", text="Ответ")
+        assert not result.ok and len(seen) == calls
+    finally:
+        await max_client.aclose()
+
+
 async def test_long_text_is_split() -> None:
     texts: list[str] = []
 

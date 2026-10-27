@@ -8,6 +8,7 @@ from fastmcp import Client
 from app.mcp_server.context import TrustedContext, UnauthorizedError
 from app.mcp_server.server import build_mcp_server
 from app.mcp_server.tools import EventTools
+from app.planner.event_service import EventService
 from app.planner.meeting_repository import MeetingStorageError
 from app.planner.meeting_service import MeetingService
 from app.planner.reminder_service import ReminderService
@@ -28,7 +29,10 @@ class McpToolTests(unittest.IsolatedAsyncioTestCase):
         self.meetings = AsyncMock(spec=MeetingService)
         self.reminders = AsyncMock(spec=ReminderService)
         self.context: TrustedContext = CONTEXT
-        mcp = build_mcp_server(EventTools(self.tasks, self.meetings, self.reminders), lambda: self.provide())
+        self.editor = AsyncMock(spec=EventService)
+        mcp = build_mcp_server(
+            EventTools(self.tasks, self.meetings, self.reminders, self.editor), lambda: self.provide()
+        )
         self.client = Client(mcp)
         await self.client.__aenter__()
         self.addAsyncCleanup(self.client.__aexit__, None, None, None)
@@ -46,7 +50,17 @@ class McpToolTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_schemas_do_not_let_the_model_choose_owner_or_action(self) -> None:
         tools = {tool.name: tool for tool in await self.client.list_tools()}
-        self.assertEqual(set(tools), {"create_event", "get_events_by_period", "get_event_by_query"})
+        self.assertEqual(
+            set(tools),
+            {
+                "create_event",
+                "get_events_by_period",
+                "get_event_by_query",
+                "reschedule_meeting",
+                "update_event",
+                "delete_event",
+            },
+        )
         for tool in tools.values():
             properties = set(tool.input_schema["properties"])
             self.assertFalse(properties & {"user_id", "owner_id", "action_id", "request_id"}, tool.name)
@@ -171,7 +185,38 @@ class McpToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["error"]["code"], "unauthorized")
         self.assertEqual(await self.tasks.list_tasks(_all_tasks()), [])
 
+    async def test_edit_and_delete_require_action_id_and_hide_storage_errors(self) -> None:
+        from uuid import uuid4
+
+        from app.planner.event_repository import EventMutationStorageError
+
+        arguments = {"event_id": str(uuid4()), "name": "Новое"}
+        self.context = TrustedContext(
+            owner_id="user-42", timezone="Europe/Moscow", request_id="r", action_id=None
+        )
+        for tool_name in ("update_event", "delete_event"):
+            args = arguments if tool_name == "update_event" else {"event_id": arguments["event_id"]}
+            self.assertEqual((await self.call(tool_name, args))["error"]["code"], "unauthorized")
+        self.editor.update_event.assert_not_called()
+        self.editor.delete_event.assert_not_called()
+        self.context = CONTEXT
+        self.editor.update_event.side_effect = EventMutationStorageError("private DSN")
+        response = await self.call("update_event", arguments)
+        self.assertEqual(response["error"]["code"], "temporary_unavailable")
+        self.assertNotIn("private", str(response))
+
     async def test_period_and_search_arguments(self) -> None:
+        for name, args in [
+            (
+                "get_events_by_period",
+                {"start_time": "2026-10-24T00:00:00Z", "end_time": "2026-10-25T00:00:00Z"},
+            ),
+            ("get_event_by_query", {"query": "тест"}),
+        ]:
+            result = await self.call(name, {**args, "sort": "random"})
+            self.assertEqual(
+                (result["error"]["code"], result["error"]["field"]), ("validation_error", "sort")
+            )
         self.meetings.list_meetings.return_value = []
         self.reminders.list_reminders.return_value = []
         cases = {

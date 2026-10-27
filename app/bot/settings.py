@@ -36,6 +36,8 @@ class BotSettings:
     key_prefix: str = "it-gorky"
     # Extra PEM bundle added to the public CAs, e.g. the Russian Trusted Root CA used by MAX.
     ca_bundle_file: str | None = None
+    # Optional restriction for a local live smoke. Other chats receive no messages.
+    test_chat_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.token.strip():
@@ -68,6 +70,8 @@ class BotSettings:
             raise ValueError("Key prefix must not be blank")
         if self.ca_bundle_file is not None and not os.path.isfile(self.ca_bundle_file):
             raise ValueError("MAX_CA_BUNDLE_FILE must point to an existing PEM file")
+        if self.test_chat_id is not None and not re.fullmatch(r"-?[0-9]+", self.test_chat_id):
+            raise ValueError("MAX_TEST_CHAT_ID must be a numeric chat ID")
 
     @classmethod
     def from_env(cls) -> "BotSettings":
@@ -84,4 +88,5 @@ class BotSettings:
             busy_ttl_s=int(os.environ.get("BOT_BUSY_TTL_S", "180")),
             max_concurrency=int(os.environ.get("BOT_MAX_CONCURRENCY", "8")),
             ca_bundle_file=os.environ.get("MAX_CA_BUNDLE_FILE") or None,
+            test_chat_id=os.environ.get("MAX_TEST_CHAT_ID") or None,
         )

@@ -12,6 +12,8 @@ from redis.exceptions import ConnectionError
 from app.planner.meeting import create_meeting
 from app.planner.meeting_repository import MeetingAlreadyExistsError, MeetingStorageError
 from app.planner.meeting_service import MeetingService
+from app.planner.operation import OperationConflictError
+from app.planner.query import RecordQuery
 from app.planner.task import Task
 from app.storage.redis import RedisSettings, redis_connection
 from app.storage.redis_index import index_key
@@ -51,6 +53,89 @@ class RedisMeetingErrorTests(unittest.IsolatedAsyncioTestCase):
     "set RUN_REDIS_INTEGRATION=1 for a dedicated test Redis",
 )
 class RedisMeetingIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reschedule_rejects_broken_index_before_any_write(self) -> None:
+        await self.repository.add(self.meeting)
+        record_key = f"{self.prefix}:v1:meeting:{self.meeting.id}"
+        self.keys.append(record_key)
+        raw = await self.client.get(record_key)
+        owner_index = index_key(self.prefix, "meeting", "user-42")
+        await self.client.set(owner_index, "broken")
+        service = MeetingService(repository=self.repository, clock=lambda: CREATED)
+        with self.assertRaises(MeetingStorageError):
+            await service.reschedule_meeting(
+                meeting_id=self.meeting.id,
+                owner_id="user-42",
+                starts_at=START + timedelta(days=1),
+                operation_id="move",
+            )
+        self.assertEqual(await self.client.get(record_key), raw)
+        self.assertEqual(await self.client.get(owner_index), "broken")
+        self.assertEqual(
+            [
+                key
+                async for key in self.client.scan_iter(
+                    match=f"{self.prefix}:v1:operation:reschedule_meeting:*"
+                )
+            ],
+            [],
+        )
+
+    async def test_reschedule_replays_and_moves_index_atomically(self) -> None:
+        await self.repository.add(self.meeting)
+        self.keys.append(f"{self.prefix}:v1:meeting:{self.meeting.id}")
+        service = MeetingService(repository=self.repository, clock=lambda: CREATED)
+        args = {
+            "meeting_id": self.meeting.id,
+            "owner_id": "user-42",
+            "starts_at": START + timedelta(days=1),
+            "operation_id": "move",
+        }
+        moved = await asyncio.gather(*(service.reschedule_meeting(**args) for _ in range(6)))
+        self.assertTrue(all(record == moved[0] for record in moved))
+        self.assertEqual(
+            moved[0], replace(self.meeting, starts_at=args["starts_at"], ends_at=END + timedelta(days=1))
+        )
+        self.assertEqual(
+            await self.repository.list(
+                RecordQuery(owner_id="user-42", start_time=START, end_time=START + timedelta(days=1))
+            ),
+            [],
+        )
+        self.assertEqual(
+            await self.repository.list(
+                RecordQuery(
+                    owner_id="user-42",
+                    start_time=args["starts_at"],
+                    end_time=args["starts_at"] + timedelta(days=1),
+                )
+            ),
+            [moved[0]],
+        )
+        self.assertIsNone(await service.reschedule_meeting(**{**args, "owner_id": "other"}))
+        with self.assertRaises(OperationConflictError):
+            await service.reschedule_meeting(**{**args, "starts_at": START})
+        self.assertEqual(await self.client.zcard(index_key(self.prefix, "meeting", "user-42")), 1)
+        self.assertEqual(await self.client.ttl(f"{self.prefix}:v1:meeting:{self.meeting.id}"), -1)
+
+    async def test_create_replay_after_move_returns_current_state(self) -> None:
+        service = MeetingService(repository=self.repository, clock=lambda: CREATED)
+        original = await service.create_meeting(
+            owner_id="user-42", title="Хакатон", starts_at=START, operation_id="create"
+        )
+        self.keys.append(f"{self.prefix}:v1:meeting:{original.id}")
+        moved = await service.reschedule_meeting(
+            meeting_id=original.id,
+            owner_id="user-42",
+            starts_at=START + timedelta(days=1),
+            operation_id="move",
+        )
+        self.assertEqual(
+            await service.create_meeting(
+                owner_id="user-42", title="Хакатон", starts_at=START, operation_id="create"
+            ),
+            moved,
+        )
+
     async def asyncSetUp(self) -> None:
         self.connection = redis_connection(RedisSettings.from_env())
         self.client = await self.connection.__aenter__()

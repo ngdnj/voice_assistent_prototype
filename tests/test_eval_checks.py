@@ -1,14 +1,6 @@
 from datetime import timedelta
 
-import pytest
-
-# The eval harness drives the agent runner of role 1 (app/agent), which is not in the
-# repository yet. Until it lands these tests are skipped with this reason instead of
-# failing the whole run.
-pytest.importorskip("app.agent.agent", reason="app/agent (role 1) is not in the repository yet")
-
 from app.agent.agent import AgentReply, ToolCall
-
 from evals.cases import CASES
 from evals.checks import (
     Expect,
@@ -22,6 +14,7 @@ from evals.checks import (
     on_day,
     speech_issues,
     types_include,
+    uuid_argument,
 )
 from evals.run import _evaluate
 
@@ -68,11 +61,26 @@ def test_evaluate_clarification_case_fails_when_event_created() -> None:
 
 
 def test_all_cases_reference_known_tools() -> None:
-    known = {None, "create_event", "get_events_by_period", "get_event_by_query", "delete_event"}
+    known = {
+        None,
+        "create_event",
+        "get_events_by_period",
+        "get_event_by_query",
+        "delete_event",
+        "update_event",
+        "reschedule_meeting",
+    }
     assert len({c.id for c in CASES}) == len(CASES)
     for case in CASES:
         assert isinstance(case.expect, Expect)
         assert case.expect.tool in known, case.id
+
+
+def test_mutation_eval_rejects_old_integer_fixture_ids():
+    check = uuid_argument("event_id")
+    assert check({"event_id": 2}) is not None
+    assert check({"event_id": "not-a-uuid"}) is not None
+    assert check({"event_id": "57a58c04-2591-4547-b16b-47bb263be833"}) is None
 
 
 def test_covers_is_half_open_and_rejects_inclusive_end() -> None:

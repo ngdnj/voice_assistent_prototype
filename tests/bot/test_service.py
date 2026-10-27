@@ -45,6 +45,8 @@ async def test_text_goes_to_backend_and_reply_is_shown() -> None:
     assert gate.locks  # type: ignore[attr-defined]
     await submit.drain()  # type: ignore[attr-defined]
     assert sender.texts == [messages.ACCEPTED, "Записал задачу «Отчёт»"]  # type: ignore[attr-defined]
+    assert sender.sent == [("777", messages.ACCEPTED)]  # type: ignore[attr-defined]
+    assert sender.edited == [("mid.1", "Записал задачу «Отчёт»")]  # type: ignore[attr-defined]
     request = backend.requests[0]  # type: ignore[attr-defined]
     assert (request.owner_id, request.text, request.timezone) == (
         "42",
@@ -65,6 +67,36 @@ async def test_voice_goes_through_asr_without_transcript_message() -> None:
     ]
     assert parts["recognizer"].calls == [(b"OggS-audio", ".ogg")]  # type: ignore[attr-defined]
     assert parts["backend"].requests[0].text == "напомни завтра позвонить Ивану"  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("mode", ["missing_id", "edit_rejected", "edit_exception"])
+async def test_reply_falls_back_without_reexecuting_backend(mode) -> None:
+    sender, backend = FakeSender(), FakeBackend()
+    if mode == "missing_id":
+        sender.result = SendResult("delivered")
+    elif mode == "edit_rejected":
+        sender.edit_result = SendResult("permanent_failure", error_code="edit_rejected")
+    else:
+
+        async def broken_edit(**kwargs):
+            raise ConnectionError("private details")
+
+        sender.edit_text = broken_edit
+    bot, parts = build_bot(sender=sender, backend=backend)
+    await bot.handle(TEXT)
+    await parts["submit"].drain()
+    assert sender.sent == [("777", messages.ACCEPTED), ("777", backend.reply)]
+    assert len(backend.requests) == 1
+
+
+async def test_backend_failure_replaces_status_with_error() -> None:
+    backend, sender = FakeBackend(), FakeSender()
+    backend.error = ValueError("private details")
+    bot, parts = build_bot(sender=sender, backend=backend)
+    await bot.handle(TEXT)
+    await parts["submit"].drain()
+    assert sender.sent == [("777", messages.ACCEPTED)]
+    assert sender.edited == [("mid.1", messages.FAILED)]
 
 
 async def test_any_input_while_processing_gets_busy_message() -> None:
@@ -318,44 +350,38 @@ async def test_limits_are_not_bypassed_by_transcription() -> None:
     assert not parts["backend"].requests  # type: ignore[attr-defined]
 
 
-async def test_status_message_is_deleted_after_reply() -> None:
+class ConfirmBackend(FakeBackend):
+    async def answer(self, request: BackendRequest) -> Reply:  # type: ignore[override]
+        return Reply(f"Ответ на: {request.text}", CONFIRM_BUTTONS)
+
+
+async def test_plain_reply_keeps_status_without_deleting() -> None:
     bot, parts = build_bot()
     await bot.handle(TEXT)
     await parts["submit"].drain()  # type: ignore[attr-defined]
-    assert parts["sender"].deleted == ["mid.status"]  # type: ignore[attr-defined]
+    assert parts["sender"].deleted == []  # type: ignore[attr-defined]
 
 
-async def test_status_is_deleted_after_error_reply_too() -> None:
-    backend = FakeBackend()
-    backend.error = RuntimeError("down")
-    bot, parts = build_bot(backend=backend)
-    await bot.handle(TEXT)
-    await parts["submit"].drain()  # type: ignore[attr-defined]
-    assert parts["sender"].texts[-1] == messages.FAILED  # type: ignore[attr-defined]
-    assert parts["sender"].deleted == ["mid.status"]  # type: ignore[attr-defined]
-
-
-async def test_status_without_id_is_not_deleted() -> None:
-    sender = FakeSender()
-    sender.result = SendResult("delivered", external_message_id="")
-    bot, parts = build_bot(sender=sender)
-    await bot.handle(TEXT)
-    await parts["submit"].drain()  # type: ignore[attr-defined]
-    assert sender.deleted == []
-
-
-async def test_reply_with_confirmation_buttons() -> None:
-    class ConfirmBackend(FakeBackend):
-        async def answer(self, request: BackendRequest) -> Reply:  # type: ignore[override]
-            return Reply(messages.YOU_SAID.format(text=request.text), CONFIRM_BUTTONS)
-
+async def test_reply_with_buttons_is_sent_and_status_deleted() -> None:
     bot, parts = build_bot(backend=ConfirmBackend())
     await bot.handle(TEXT)
     await parts["submit"].drain()  # type: ignore[attr-defined]
     sender = parts["sender"]
-    assert sender.texts[-1] == "Вы сказали: Создай задачу отчёт\nВсе верно?"  # type: ignore[attr-defined]
+    assert sender.edited == []  # type: ignore[attr-defined]
+    assert sender.texts[-1] == "Ответ на: Создай задачу отчёт"  # type: ignore[attr-defined]
     assert sender.buttons[-1] == (("Да, все верно", "confirm:yes"), ("Нет", "confirm:no"))  # type: ignore[attr-defined]
     assert sender.buttons[0] == ()  # type: ignore[attr-defined]
+    assert sender.deleted == ["mid.1"]  # type: ignore[attr-defined]
+
+
+async def test_reply_with_buttons_without_status_id_deletes_nothing() -> None:
+    sender = FakeSender()
+    sender.result = SendResult("delivered", external_message_id="")
+    bot, parts = build_bot(sender=sender, backend=ConfirmBackend())
+    await bot.handle(TEXT)
+    await parts["submit"].drain()  # type: ignore[attr-defined]
+    assert sender.deleted == []
+    assert sender.buttons[-1] == CONFIRM_BUTTONS
 
 
 def press(payload: str, callback_id: str = "cb.1", chat_id: str | None = "777") -> CallbackPressed:

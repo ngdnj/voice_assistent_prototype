@@ -1,5 +1,6 @@
 """Minimal storage boundary for meetings."""
 
+from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
@@ -17,6 +18,21 @@ class MeetingAlreadyExistsError(MeetingStorageError):
 
 
 class MeetingRepository(Protocol):
+    async def get_rescheduled(self, *, owner_id: str, operation: CreationOperation) -> Meeting | None:
+        """Replay a matching reschedule in its current state; reject different arguments."""
+        ...
+
+    async def reschedule(
+        self,
+        meeting: Meeting,
+        *,
+        previous: Meeting,
+        operation: CreationOperation,
+        changed_at: datetime,
+    ) -> Meeting | None:
+        """Atomically replace times and save the operation, checking the previous times and owner."""
+        ...
+
     async def add(self, meeting: Meeting, *, operation: CreationOperation | None = None) -> Meeting:
         """Store a meeting before returning successfully."""
         ...

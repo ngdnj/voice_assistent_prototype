@@ -1,15 +1,35 @@
 # Голосовой ассистент IT Gorky
 
+[Редактирование и удаление](docs/event-editing.md): смена названия, времени встречи/напоминания,
+срока задачи и удаление через агента. Перед запуском обновлённого MCP — `alembic upgrade head`.
+
+[Списки в чате и сортировка](docs/chat-lists.md): нумерованная выдача по времени,
+по просьбе пользователя — обратный порядок дат, длительность встреч, алфавит или время добавления.
+
+[Запуск MAX-бота с агентом и PostgreSQL](docs/live-bot.md):
+`uv run --locked --env-file .env python -m app.bot polling --text-only`.
+DemoBackend заменён настоящим агентом; для живого прогона нужны отдельный MAX-токен,
+доступ GigaChat и работающий MCP.
+
+[Перенос встречи и время словами](docs/meeting-reschedule.md):
+«Завтра встреча с часу до пяти по обсуждению хакатона», затем
+«Перенеси обсуждение хакатона на послезавтра в три часа дня».
+Ответ заменяет статус обработки. Перед запуском обновлённого MCP:
+`uv run --locked --env-file .env alembic upgrade head`.
+
+Доступен [текстовый агент через MCP и PostgreSQL](docs/text-agent.md):
+`python -m app.agent`. Он использует существующие бизнес-операции и AI-адаптеры;
+MAX, долговечные jobs/outbox и процессы worker/dispatcher подключаются отдельно.
+
 Ассистент задач, встреч и напоминаний для российского MAX. Планируемый ввод —
 свободный текст и голос; бот и MAX Mini App работают с одними записями пользователя.
 
-Реализована минимальная модель задачи в `app/planner/task.py`: UUID, владелец,
-название, статус `todo`/`in_progress`/`done` (начальный `todo`) и явно передаваемое время создания в UTC.
-Добавлены прикладной `TaskService`, async-протокол `TaskRepository` и
-демонстрационный `InMemoryTaskRepository` и адаптер `RedisTaskRepository`.
-Redis временно используется как основное хранилище задач прототипа.
-API/worker/dispatcher пока не реализованы. Локальный backend запускается через
-`python -m app`; адаптеры LLM/ASR разрабатываются отдельно и здесь не запускаются.
+Реализованы модели и операции задач, встреч и напоминаний, PostgreSQL-репозитории,
+MCP-инструменты и REST для Mini App. Текстовый агент использует PostgreSQL через MCP.
+Redis хранит историю и план обработки; ранние Redis-репозитории записей сохранены
+для тестов и старого CLI-примера. Бизнес-правила не зависят от транспорта.
+Общий API с MAX webhook, agent worker и dispatcher пока не собраны.
+`python -m app` — ранний Redis check/example; `python -m app.agent` — новый текстовый путь.
 
 ## Быстрый локальный запуск backend
 
@@ -261,7 +281,8 @@ async context manager на время жизни процесса: создаё�
 
 ## MCP server (роль 4)
 
-Три инструмента для агента — `create_event`, `get_events_by_period`, `get_event_by_query` — на
+Шесть инструментов — `create_event`, `get_events_by_period`, `get_event_by_query`, `reschedule_meeting`,
+`update_event`, `delete_event` — на
 FastMCP поверх тех же сервисов planner и PostgreSQL-репозиториев. Контракт для ролей 1, 3 и 5,
 заголовки и примеры: [app/mcp_server/INTEGRATION.md](app/mcp_server/INTEGRATION.md).
 
@@ -514,10 +535,10 @@ evals/           # Оценка качества ASR и понимания за�
 docs/            # Архитектурные решения и документация
 ```
 
-Каждый каталог внутри `app/` содержит пустой `__init__.py`.
-В `tests/test_task.py` находятся проверки модели, в `tests/test_task_service.py` —
-сервиса и демонстрационного хранилища; `evals/` пока содержит `.gitkeep`.
-Внутренние подпапки и файлы реализации появятся вместе с конкретными сценариями.
+Реализация размещена в соответствующих Python-пакетах, тесты — в `tests/`.
+`evals/` содержит сценарии ASR/LLM и runner с отдельным тестовым PostgreSQL.
+Наличие пакета само по себе не означает готовую интеграцию; актуальный текстовый
+путь, его проверки и ограничения описаны в [text-agent.md](docs/text-agent.md).
 
 ## Обязательные сценарии
 
@@ -548,4 +569,6 @@ GigaAM и Yandex SpeechKit. Mini App — React/TypeScript/Vite/MAX Bridge;
 
 Создание задачи в памяти и проверки её правил реализованы.
 Зависимость `redis` закреплена в `pyproject.toml` и `uv.lock`.
-pytest, Ruff и mypy пока не настроены. Точки запуска API/worker отсутствуют.
+pytest, Ruff и mypy настроены в `pyproject.toml` и GitHub Actions.
+MCP/REST запускается через `python -m app.mcp_server`; production worker/dispatcher
+и общая сборка MAX API остаются следующим блоком.

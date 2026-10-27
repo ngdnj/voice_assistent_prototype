@@ -1,4 +1,4 @@
-"""Eval cases: the five request classes of AGENTS §15 plus deletion (off the MVP contract).
+"""Eval cases: the five request classes of AGENTS §15 plus explicit deletion scenarios.
 
 Classes: create, period, clarify, search, general; delete is reported separately.
 
@@ -31,6 +31,7 @@ from evals.checks import (
     on_day,
     one_of,
     types_include,
+    uuid_argument,
 )
 
 Category = Literal["create", "period", "clarify", "search", "general", "delete"]
@@ -320,35 +321,26 @@ CASES: list[Case] = [
         ["Напомни завтра в 9 позвонить в банк", "Спасибо"],
         Expect(None),
     ),
-    # 7. Deletion is not an MVP tool: without delete_event the agent says it cannot, and claims nothing
-    Case(
-        "delete_unsupported",
-        "delete",
-        ["Удали встречу с Иваном"],
-        Expect(None, forbid=["delete_event", "create_event"], answer_mentions=["не уме|не могу|пока"]),
-        seed=SEED,
-        delete_tool=False,
-    ),
-    # Deletion with delete_event on: find the record first, delete by id, ask when ambiguous
+    # Deletion is supported: use real UUIDs from search, ask when the selection is ambiguous.
     Case(
         "delete_meeting_ivan",
         "delete",
         ["Удали встречу с Иваном"],
-        Expect("delete_event", [equals("event_id", 2)], answer_mentions=["иван"]),
+        Expect("delete_event", [uuid_argument("event_id")], answer_mentions=["иван"]),
         seed=SEED,
     ),
     Case(
         "cancel_team_call",
         "delete",
         ["Отмени созвон с командой"],
-        Expect("delete_event", [equals("event_id", 4)]),
+        Expect("delete_event", [uuid_argument("event_id")], answer_mentions=["команд"]),
         seed=SEED,
     ),
     Case(
         "delete_after_search",
         "delete",
         ["Найди задачу про договор", "Удали её"],
-        Expect("delete_event", [equals("event_id", 3)]),
+        Expect("delete_event", [uuid_argument("event_id")], answer_mentions=["договор"]),
         seed=SEED,
     ),
     Case(

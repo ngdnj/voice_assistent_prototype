@@ -9,7 +9,7 @@ from redis.exceptions import RedisError
 
 from app.planner.meeting import Meeting
 from app.planner.meeting_repository import MeetingAlreadyExistsError, MeetingStorageError
-from app.planner.operation import CreationOperation
+from app.planner.operation import CreationOperation, OperationConflictError
 from app.planner.query import QueryTooBroadError, RecordQuery
 from app.storage.redis_index import (
     ADD_INDEXED,
@@ -19,6 +19,20 @@ from app.storage.redis_index import (
     read_index,
 )
 from app.storage.redis_operation import commit_operation, operation_key, read_operation
+
+# All checks precede writes: Redis Lua errors do not roll earlier writes back.
+RESCHEDULE = """local saved = redis.call('GET', KEYS[3])
+if saved then return {2, saved} end
+local old = redis.call('GET', KEYS[1])
+if not old then return {0, ''} end
+if old ~= ARGV[1] then return {-1, ''} end
+if redis.call('TYPE', KEYS[2]).ok ~= 'zset' then return redis.error_reply('Invalid index') end
+if redis.call('ZSCORE', KEYS[2], ARGV[3]) ~= '0' then return redis.error_reply('Invalid member') end
+redis.call('SET', KEYS[1], ARGV[2])
+redis.call('ZREM', KEYS[2], ARGV[3])
+redis.call('ZADD', KEYS[2], 0, ARGV[4])
+redis.call('SET', KEYS[3], ARGV[5] .. '\\n' .. ARGV[2])
+return {1, ARGV[2]}"""
 
 
 class RedisMeetingRepository:
@@ -31,7 +45,8 @@ class RedisMeetingRepository:
     def _key(self, meeting_id: UUID) -> str:
         return f"{self._key_prefix}:v1:meeting:{meeting_id}"
 
-    async def add(self, meeting: Meeting, *, operation: CreationOperation | None = None) -> Meeting:
+    @staticmethod
+    def _encode(meeting: Meeting) -> str:
         data = {
             "id": str(meeting.id),
             "owner_id": meeting.owner_id,
@@ -43,7 +58,10 @@ class RedisMeetingRepository:
         # A meeting without a known end stores no "ends_at".
         if meeting.ends_at is not None:
             data["ends_at"] = meeting.ends_at.isoformat()
-        payload = json.dumps(data, ensure_ascii=False)
+        return json.dumps(data, ensure_ascii=False)
+
+    async def add(self, meeting: Meeting, *, operation: CreationOperation | None = None) -> Meeting:
+        payload = self._encode(meeting)
         try:
             if operation is not None:
                 saved = await commit_operation(
@@ -110,8 +128,11 @@ class RedisMeetingRepository:
             if any(value.utcoffset() != timedelta(0) for value in moments.values()):
                 raise ValueError("Expected UTC timestamps")
             meeting = Meeting(
-                id=stored_id, owner_id=data["owner_id"], title=data["title"],
-                description=data.get("description", ""), **moments,
+                id=stored_id,
+                owner_id=data["owner_id"],
+                title=data["title"],
+                description=data.get("description", ""),
+                **moments,
             )
             if meeting.title != data["title"] or meeting.description != data.get("description", ""):
                 raise ValueError("Expected normalized title and description")
@@ -120,6 +141,8 @@ class RedisMeetingRepository:
             raise MeetingStorageError("Stored meeting data is invalid") from None
 
     async def list(self, query: RecordQuery) -> list[Meeting]:
+        if query.sort is not None:
+            raise ValueError("Explicit sort requires the PostgreSQL adapter")
         try:
             members = await read_index(
                 self._client, index_key(self._key_prefix, "meeting", query.owner_id), query
@@ -189,11 +212,88 @@ class RedisMeetingRepository:
             if record.owner_id != owner_id:
                 raise ValueError("Operation owner mismatch")
             actual = await self._client.get(self._key(record.id))
+            if actual is None:
+                raise ValueError("Operation result is missing")
+            current = self._decode(actual, record.id)
             score = await self._client.zscore(
-                index_key(self._key_prefix, "meeting", owner_id), index_member(record.starts_at, record.id)
+                index_key(self._key_prefix, "meeting", owner_id), index_member(current.starts_at, current.id)
             )
-            if actual != payload or score != 0:
+            if (current.owner_id, current.title, current.description, current.created_at) != (
+                record.owner_id,
+                record.title,
+                record.description,
+                record.created_at,
+            ) or score != 0:
                 raise ValueError("Operation result is inconsistent with record/index")
-            return record
+            return current
         except (RedisError, UnicodeError, ValueError, TypeError, KeyError):
             raise MeetingStorageError("Meeting operation result is invalid") from None
+
+    def _reschedule_key(self, owner_id: str, operation: CreationOperation) -> str:
+        # A separate operation namespace: legacy create keys stay compatible.
+        return (
+            f"{self._key_prefix}:v1:operation:reschedule_meeting:"
+            f"{owner_id.encode().hex()}:{operation.operation_id.encode().hex()}"
+        )
+
+    async def get_rescheduled(self, *, owner_id: str, operation: CreationOperation) -> Meeting | None:
+        try:
+            saved = await read_operation(self._client, self._reschedule_key(owner_id, operation), operation)
+            return None if saved is None else await self._operation_result(saved, owner_id)
+        except (RedisError, UnicodeError):
+            raise MeetingStorageError("Meeting operation read failed") from None
+
+    async def reschedule(
+        self,
+        meeting: Meeting,
+        *,
+        previous: Meeting,
+        operation: CreationOperation,
+        changed_at: datetime,
+    ) -> Meeting | None:
+        try:
+            replay = await self.get_rescheduled(owner_id=meeting.owner_id, operation=operation)
+            if replay is not None:
+                return replay
+            raw = await self._client.get(self._key(meeting.id))
+            if raw is None:
+                return None
+            current = self._decode(raw, meeting.id)
+            if current.owner_id != meeting.owner_id:
+                return None
+            if (current.starts_at, current.ends_at) != (previous.starts_at, previous.ends_at):
+                replay = await self.get_rescheduled(owner_id=meeting.owner_id, operation=operation)
+                if replay is not None:
+                    return replay
+                raise OperationConflictError("Meeting changed concurrently; read it again")
+            code, payload = await self._client.eval(
+                RESCHEDULE,
+                3,
+                self._key(meeting.id),
+                index_key(self._key_prefix, "meeting", meeting.owner_id),
+                self._reschedule_key(meeting.owner_id, operation),
+                raw,
+                self._encode(meeting),
+                index_member(previous.starts_at, previous.id),
+                index_member(meeting.starts_at, meeting.id),
+                operation.fingerprint,
+            )
+            if code == 0:
+                return None
+            if code == -1:
+                # Another copy may have committed this very operation between our two reads.
+                replay = await self.get_rescheduled(owner_id=meeting.owner_id, operation=operation)
+                if replay is not None:
+                    return replay
+                raise OperationConflictError("Meeting changed concurrently; read it again")
+            if code == 2:
+                # Validate the saved fingerprint with the same parser as ordinary replays.
+                replay = await self.get_rescheduled(owner_id=meeting.owner_id, operation=operation)
+                if replay is None:
+                    raise MeetingStorageError("Meeting operation is missing")
+                return replay
+            if code != 1 or not isinstance(payload, str):
+                raise MeetingStorageError("Invalid reschedule result")
+            return self._decode(payload, meeting.id)
+        except (RedisError, UnicodeError):
+            raise MeetingStorageError("Meeting reschedule failed") from None

@@ -86,6 +86,8 @@ class Sender(Protocol):
     async def delete_message(self, *, message_id: str) -> str: ...
     async def answer_callback(self, *, callback_id: str) -> str: ...
 
+    async def edit_text(self, *, message_id: str, text: str) -> SendResult: ...
+
 
 class AudioSource(Protocol):
     async def download_audio(self, url: str) -> bytes: ...
@@ -144,6 +146,7 @@ class BotService:
         timezone: str,
         processing_timeout_s: float,
         clock: Callable[[], datetime],
+        allowed_chat_id: str | None = None,
     ) -> None:
         self._sender = sender
         self._gate = gate
@@ -154,6 +157,7 @@ class BotService:
         self._timezone = timezone
         self._timeout = processing_timeout_s
         self._clock = clock
+        self._allowed_chat_id = allowed_chat_id
 
     async def handle(self, event: BotEvent) -> Outcome:
         """Handle one parsed update. Redis errors propagate so the webhook is redelivered."""
@@ -164,6 +168,9 @@ class BotService:
                 log_event("message_without_payload")
             else:
                 metrics.UPDATES.labels("other", "ignored").inc()
+            return "ignored"
+        if self._allowed_chat_id is not None and event.chat_id != self._allowed_chat_id:
+            metrics.UPDATES.labels("other", "ignored").inc()
             return "ignored"
         if isinstance(event, BotStarted):
             kind, event_id = "start", event.event_id
@@ -219,15 +226,14 @@ class BotService:
             return "busy"
         try:
             status = await self._send(incoming.chat_id, messages.ACCEPTED, "status")
-            if status.ok and not status.external_message_id:
-                log_event("status_id_unknown", request_id=incoming.request_id)  # It cannot be deleted later.
-            admitted = self._submit(self._process(incoming, job_id, status.external_message_id))
+            status_id = status.external_message_id if status.ok else ""
+            admitted = self._submit(self._process(incoming, job_id, status_id))
         except BaseException:
             await asyncio.shield(self._release(incoming.owner_id, job_id))
             raise
         if not admitted:
             await self._release(incoming.owner_id, job_id)
-            await self._send(incoming.chat_id, messages.NOT_ACCEPTED, "error")
+            await self._finish_reply(incoming.chat_id, status_id, messages.NOT_ACCEPTED, "error")
             log_event("rejected", request_id=incoming.request_id)
             return "rejected"
         log_event("accepted", request_id=incoming.request_id, job_id=job_id)
@@ -277,7 +283,31 @@ class BotService:
             # The lock still expires by its TTL; the user is blocked at most BOT_BUSY_TTL_S.
             log_event("lock_release_failed", job_id=job_id)
 
-    async def _process(self, incoming: IncomingMessage, job_id: str, status_message_id: str = "") -> None:
+    async def _finish_reply(self, chat_id: str, status_id: str, text: str, purpose: str) -> None:
+        if status_id:
+            started = time.monotonic()
+            try:
+                result = await self._sender.edit_text(message_id=status_id, text=text)
+            except Exception:
+                # Editing must never repeat an already completed backend operation.
+                result = SendResult("retryable_failure", error_code="edit_failed")
+            metrics.SEND_SECONDS.labels("edit").observe(time.monotonic() - started)
+            metrics.SENDS.labels("edit", result.outcome).inc()
+            if result.ok:
+                return
+            log_event("edit_failed", outcome=result.outcome, error_code=result.error_code)
+        # Missing status ID or rejected edit: preserve the answer via an ordinary send.
+        await self._send(chat_id, text, purpose)
+
+    async def _reply_with_buttons(self, chat_id: str, status_id: str, reply: Reply, purpose: str) -> None:
+        """Send a reply with callback buttons as a new message, then remove the status message."""
+        await self._send(chat_id, reply.text, purpose, reply.buttons)
+        if status_id:
+            code = await self._sender.delete_message(message_id=status_id)
+            if code:
+                log_event("status_delete_failed", error_code=code)
+
+    async def _process(self, incoming: IncomingMessage, job_id: str, status_id: str = "") -> None:
         ids: dict[str, str | UUID] = {"request_id": incoming.request_id, "job_id": job_id}
         reply: str | Reply | None = None
         outcome = "failed"
@@ -290,14 +320,18 @@ class BotService:
             except Exception:
                 reply, outcome = messages.FAILED, "failed"
             log_event(f"processing_{outcome}", **ids)
-            final = reply if isinstance(reply, Reply) else Reply(reply or messages.FAILED)
-            purpose = "reply" if outcome == "replied" else "error"
-            await self._send(incoming.chat_id, final.text, purpose, final.buttons)
-            # The "accepted" status is no longer needed once the answer is in the chat.
-            if status_message_id:
-                code = await self._sender.delete_message(message_id=status_message_id)
-                if code:
-                    log_event("status_delete_failed", error_code=code, **ids)
+            # Replies with buttons cannot be produced by editing the status: send them separately.
+            if isinstance(reply, Reply):
+                if reply.buttons:
+                    purpose = "reply" if outcome == "replied" else "error"
+                    await self._reply_with_buttons(incoming.chat_id, status_id, reply, purpose)
+                    reply = None
+                else:
+                    reply = reply.text
+            if reply:
+                await self._finish_reply(
+                    incoming.chat_id, status_id, reply, "reply" if outcome == "replied" else "error"
+                )
         except asyncio.CancelledError:
             outcome = "cancelled"
             log_event("processing_cancelled", **ids)
@@ -312,7 +346,7 @@ class BotService:
             recognized, outcome = await self._recognize(incoming)
             if recognized is None:
                 return outcome
-            text = recognized  # Shown to the user by the reply itself ("Вы сказали: ...").
+            text = recognized
         if text is None:
             raise ValueError("Message has no text to process")
         reply = await self._backend.answer(

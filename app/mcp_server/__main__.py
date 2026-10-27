@@ -19,10 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.api.records import INIT_DATA_HEADER, build_records_router
 from app.mcp_server.server import build_mcp_server, header_context
 from app.mcp_server.tools import EventTools
+from app.planner.event_service import EventService
 from app.planner.meeting_service import MeetingService
 from app.planner.reminder_service import ReminderService
 from app.planner.service import TaskService
 from app.storage.postgres.engine import postgres_engine, session_factory
+from app.storage.postgres.event_mutations import PostgresEventMutations
 from app.storage.postgres.meetings import PostgresMeetingRepository
 from app.storage.postgres.reminders import PostgresReminderRepository
 from app.storage.postgres.settings import PostgresSettings
@@ -69,6 +71,7 @@ def clock() -> datetime:
 
 def build_tools(sessions: async_sessionmaker[AsyncSession]) -> EventTools:
     return EventTools(
+        editor=EventService(repository=PostgresEventMutations(sessions), clock=clock),
         tasks=TaskService(repository=PostgresTaskRepository(sessions), clock=clock),
         meetings=MeetingService(repository=PostgresMeetingRepository(sessions), clock=clock),
         reminders=ReminderService(repository=PostgresReminderRepository(sessions), clock=clock),

@@ -17,7 +17,6 @@ AUDIO_TOO_LARGE = "Файл записи слишком большой. Запи
 AUDIO_UNREADABLE = "Не удалось прочитать запись. Попробуйте записать ещё раз или напишите текстом."
 AUDIO_FAILED = "Не удалось распознать голосовое. Попробуйте ещё раз чуть позже или напишите текстом."
 FAILED = "Не получилось обработать запрос. Попробуйте ещё раз чуть позже."
-YOU_SAID = "Вы сказали: {text}\nВсе верно?"
 REPEAT_REQUEST = "Повторите запрос."
 # Callback button payloads: short fixed codes, never user data.
 CONFIRM_YES = "confirm:yes"

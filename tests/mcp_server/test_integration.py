@@ -1,7 +1,9 @@
 import asyncio
 import socket
 import unittest
+from datetime import UTC, datetime
 from typing import Any
+from unittest.mock import patch
 from uuid import uuid4
 
 import uvicorn
@@ -17,6 +19,7 @@ from app.storage.postgres.tables import events, operations
 from tests.storage_pg import integration_settings, migrate_test_database, requires_postgres
 
 TOKEN = "integration-test-token-" + "x" * 16
+NOW = datetime(2026, 10, 23, 8, tzinfo=UTC)
 DAY = {"start_time": "2026-10-24T00:00:00+03:00", "end_time": "2026-10-25T00:00:00+03:00"}
 
 
@@ -36,7 +39,8 @@ class McpPostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self.cleanup)
         self.action = 0
         self.caller = self.owner
-        self.mcp = build_mcp_server(build_tools(self.sessions), self.context)
+        with patch("app.mcp_server.__main__.clock", return_value=NOW):
+            self.mcp = build_mcp_server(build_tools(self.sessions), self.context)
         self.client = Client(self.mcp)
         await self.client.__aenter__()
         self.addAsyncCleanup(self.client.__aexit__, None, None, None)
@@ -103,6 +107,31 @@ class McpPostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.call("get_events_by_period", DAY))["events"], [])
         self.assertEqual((await self.call("get_event_by_query", {"query": "встреча"}))["events"], [])
 
+    async def test_reschedule_tool_preserves_id_and_duration_and_rejects_other_owner(self) -> None:
+        original = (
+            await self.call(
+                "create_event",
+                {
+                    "event_type": "meeting",
+                    "name": "Хакатон",
+                    "datetime": "2026-10-24T13:00:00+03:00",
+                    "end_time": "2026-10-24T17:00:00+03:00",
+                },
+            )
+        )["created"]
+        args = {"meeting_id": original["id"], "datetime": "2026-10-25T15:00:00+03:00"}
+        moved = await self.call("reschedule_meeting", args)
+        self.assertEqual(moved["updated"]["id"], original["id"])
+        self.assertEqual(moved["updated"]["datetime"], "2026-10-25T12:00:00Z")
+        self.assertEqual(moved["updated"]["end_time"], "2026-10-25T16:00:00Z")
+        self.assertEqual(await self.call("reschedule_meeting", args, new_action=False), moved)
+        self.assertEqual(
+            (await self.call("reschedule_meeting", {"meeting_id": original["id"]}))["error"]["code"],
+            "validation_error",
+        )
+        self.caller = self.other
+        self.assertEqual((await self.call("reschedule_meeting", args))["error"]["code"], "not_found")
+
     async def test_retried_tool_call_creates_one_record(self) -> None:
         arguments = {"event_type": "reminder", "name": "Позвонить", "datetime": "2026-10-24T12:00:00+03:00"}
         first = await self.call("create_event", arguments)
@@ -115,6 +144,66 @@ class McpPostgresIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 select(func.count()).select_from(events).where(events.c.owner_id == self.owner)
             )
         self.assertEqual(count, 1)
+
+    async def test_order_and_limit_cover_all_types_before_shaping_the_answer(self) -> None:
+        for args in [
+            {
+                "event_type": "meeting",
+                "name": "Короткая",
+                "datetime": "2026-10-24T09:00:00Z",
+                "end_time": "2026-10-24T09:20:00Z",
+            },
+            {
+                "event_type": "meeting",
+                "name": "Длинная",
+                "datetime": "2026-10-24T10:00:00Z",
+                "end_time": "2026-10-24T14:00:00Z",
+            },
+            {"event_type": "meeting", "name": "Без окончания", "datetime": "2026-10-24T12:00:00Z"},
+            {"event_type": "reminder", "name": "Позднее напоминание", "datetime": "2026-10-24T17:00:00Z"},
+        ]:
+            await self.call("create_event", args)
+        late = await self.call("get_events_by_period", {**DAY, "sort": "time_desc", "limit": 1})
+        self.assertEqual([event["name"] for event in late["events"]], ["Позднее напоминание"])
+        durations = await self.call("get_events_by_period", {**DAY, "sort": "duration_desc", "limit": 2})
+        self.assertEqual([event["name"] for event in durations["events"]], ["Длинная", "Короткая"])
+        self.assertTrue(durations["truncated"])
+        found = await self.call(
+            "get_event_by_query", {"query": "длинная", "sort": "duration_desc", "limit": 1}
+        )
+        self.assertEqual([event["name"] for event in found["events"]], ["Длинная"])
+        self.assertNotIn("truncated", found)
+
+    async def test_update_and_delete_flow_preserves_owner_and_action_identity(self) -> None:
+        created = (
+            await self.call(
+                "create_event",
+                {
+                    "event_type": "meeting",
+                    "name": "Хакатон",
+                    "datetime": "2026-10-24T13:00:00+03:00",
+                    "end_time": "2026-10-24T17:00:00+03:00",
+                },
+            )
+        )["created"]
+        args = {"event_id": created["id"], "name": "Планёрка", "datetime": "2026-10-25T15:00:00+03:00"}
+        updated = await self.call("update_event", args)
+        self.assertEqual(updated["updated"]["id"], created["id"])
+        self.assertEqual(updated["updated"]["name"], "Планёрка")
+        self.assertEqual(updated["updated"]["end_time"], "2026-10-25T16:00:00Z")
+        self.assertEqual(await self.call("update_event", args, new_action=False), updated)
+        self.caller = self.other
+        self.assertEqual(
+            (await self.call("delete_event", {"event_id": created["id"]}))["error"]["code"], "not_found"
+        )
+        self.caller = self.owner
+        deleted = await self.call("delete_event", {"event_id": created["id"]})
+        self.assertEqual(deleted["deleted"]["id"], created["id"])
+        self.assertEqual(
+            await self.call("delete_event", {"event_id": created["id"]}, new_action=False), deleted
+        )
+        self.assertEqual(await self.call("get_event_by_query", {"query": "Планёрка"}), {"events": []})
+        self.assertEqual((await self.call("update_event", args))["error"]["code"], "not_found")
 
     async def test_http_transport_checks_token_and_headers(self) -> None:
         mcp = build_mcp_server(build_tools(self.sessions), header_context(TOKEN))

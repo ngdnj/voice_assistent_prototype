@@ -9,8 +9,8 @@
 
 This is a development entry point, not a new production process: in the target
 architecture the webhook router is mounted into the API (INTEGRATION.md §3).
-The agent runner of role 1 is not in `main` yet, so the backend here is an explicit
-demonstration stub that only echoes the request; it does not create records.
+The backend uses the real agent and MCP/PostgreSQL. Jobs still run in process;
+crash recovery requires the future durable jobs/outbox block.
 """
 
 import argparse
@@ -28,39 +28,22 @@ from fastapi import FastAPI
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
+from app.agent.agent import Assistant, Pricing
+from app.agent.bot_backend import AgentBackend
+from app.agent.history import RedisChatHistory
+from app.agent.mcp import McpGateway
 from app.asr.base import SpeechRecognizer
-from app.bot import messages
 from app.bot.client import MaxClient, SubscriptionError
 from app.bot.gate import RedisGate
 from app.bot.polling import UPDATE_TYPES, run_polling
-from app.bot.service import (
-    CONFIRM_BUTTONS,
-    BackendRequest,
-    BackgroundRunner,
-    BotService,
-    Reply,
-    log_event,
-)
+from app.bot.service import Backend, BackgroundRunner, BotService, log_event
 from app.bot.settings import BotSettings
 from app.bot.webhook import build_webhook_app
+from app.config import get_settings
+from app.llm.model import build_chat_model, close_chat_model
 from app.storage.redis import RedisSettings, redis_connection
 
 SHUTDOWN_TIMEOUT_S = 10.0
-
-
-class DemoBackend:
-    """Stub until the agent runner is connected; says so to the user instead of faking success.
-
-    BOT_DEMO_DELAY_S imitates a slow backend, so the "busy" answer can be checked by hand.
-    """
-
-    def __init__(self, delay_s: float) -> None:
-        self._delay_s = delay_s
-
-    async def answer(self, request: BackendRequest) -> Reply:
-        await asyncio.sleep(self._delay_s)
-        # Echo for checking text and voice recognition; "yes" has no action until the agent is wired.
-        return Reply(messages.YOU_SAID.format(text=request.text), CONFIRM_BUTTONS)
 
 
 def build_recognizer() -> SpeechRecognizer | None:
@@ -86,13 +69,6 @@ def build_recognizer() -> SpeechRecognizer | None:
     return recognizer
 
 
-def demo_delay(settings: BotSettings) -> float:
-    delay_s = float(os.environ.get("BOT_DEMO_DELAY_S", "0"))
-    if not 0 <= delay_s < settings.processing_timeout_s:
-        raise ValueError("BOT_DEMO_DELAY_S must be between 0 and BOT_PROCESSING_TIMEOUT_S")
-    return delay_s
-
-
 def build_bot(
     settings: BotSettings,
     *,
@@ -100,17 +76,19 @@ def build_bot(
     client: MaxClient,
     runner: BackgroundRunner,
     recognizer: SpeechRecognizer | None,
+    backend: Backend,
 ) -> BotService:
     return BotService(
         sender=client,
         gate=RedisGate(redis, prefix=settings.key_prefix, busy_ttl_s=settings.busy_ttl_s),
-        backend=DemoBackend(demo_delay(settings)),
+        backend=backend,
         submit=runner.submit,
         audio=client,
         recognizer=recognizer,
         timezone=settings.default_timezone,
         processing_timeout_s=settings.processing_timeout_s,
         clock=lambda: datetime.now(UTC),
+        allowed_chat_id=settings.test_chat_id,
     )
 
 
@@ -172,28 +150,53 @@ def start_warm_up(recognizer: SpeechRecognizer | None) -> asyncio.Task[None] | N
 
 
 async def serve(mode: str, args: argparse.Namespace) -> int:
-    """Run the bot in polling or webhook mode with one Redis pool and one MAX client."""
+    """Run local MAX -> agent -> MCP with shared Redis and bounded shutdown."""
     settings = BotSettings.from_env()
-    demo_delay(settings)  # Fail on bad settings before connecting anywhere.
     if mode == "webhook" and not settings.webhook_secret:
         raise ValueError("MAX_WEBHOOK_SECRET is required for the webhook mode")
-    recognizer = build_recognizer()
+    ml = get_settings()
+    gateway = McpGateway(ml.mcp_url or "", os.environ.get("MCP_SERVICE_TOKEN", ""))
+    model = build_chat_model(ml)
+    recognizer = None if args.text_only else build_recognizer()
     client = MaxClient(settings)
     runner = BackgroundRunner(max_concurrency=settings.max_concurrency)
     warm_up = start_warm_up(recognizer)
     try:
+        if mode == "polling" and await client.list_subscriptions():
+            log_event("polling_blocked_by_webhook")
+            return 1
         async with redis_connection(RedisSettings.from_env()) as redis:
-            bot = build_bot(settings, redis=redis, client=client, runner=runner, recognizer=recognizer)
+            history = RedisChatHistory(redis, ml.history_max_turns, ml.history_ttl_s, ml.history_max_tokens)
+            backend = AgentBackend(Assistant(model, gateway, history, Pricing(*ml.pricing)))
+            bot = build_bot(
+                settings, redis=redis, client=client, runner=runner, recognizer=recognizer, backend=backend
+            )
             stop = asyncio.Event()
             install_stop(stop)
-            if mode == "webhook":
-                app = build_webhook_app(bot, secret=settings.webhook_secret, path=args.path)
-                log_event("bot_webhook_started", host=args.host, port=str(args.port), path=args.path)
-                await run_webhook_server(app, host=args.host, port=args.port, stop=stop)
-            else:
-                log_event("bot_polling_started")
-                await run_polling(client, bot, stop)
-            await runner.aclose(SHUTDOWN_TIMEOUT_S)
+            try:
+                if mode == "webhook":
+                    app = build_webhook_app(bot, secret=settings.webhook_secret, path=args.path)
+                    log_event("bot_webhook_started", host=args.host, port=str(args.port), path=args.path)
+                    await run_webhook_server(app, host=args.host, port=args.port, stop=stop)
+                else:
+                    log_event("bot_polling_started", backend="agent")
+                    polling = asyncio.create_task(run_polling(client, bot, stop))
+                    stopping = asyncio.create_task(stop.wait())
+                    try:
+                        await asyncio.wait((polling, stopping), return_when=asyncio.FIRST_COMPLETED)
+                        if polling.done():
+                            await polling
+                        else:
+                            polling.cancel()
+                            await asyncio.gather(polling, return_exceptions=True)
+                    finally:
+                        for task in (polling, stopping):
+                            if not task.done():
+                                task.cancel()
+                        await asyncio.gather(polling, stopping, return_exceptions=True)
+            finally:
+                # Drain before closing the pool used by agent state and lock release.
+                await runner.aclose(SHUTDOWN_TIMEOUT_S)
     except RedisError:
         log_event("redis_unavailable")
         return 1
@@ -201,9 +204,14 @@ async def serve(mode: str, args: argparse.Namespace) -> int:
         if warm_up is not None and not warm_up.done():
             # The loading thread cannot be interrupted; the process exits without waiting for it.
             warm_up.cancel()
-        await client.aclose()
-        if recognizer is not None:
-            await recognizer.aclose()
+        try:
+            await client.aclose()
+        finally:
+            try:
+                if recognizer is not None:
+                    await recognizer.aclose()
+            finally:
+                await close_chat_model(model)
         log_event("bot_stopped")
     return 0
 
@@ -235,8 +243,10 @@ async def manage_subscriptions(command: str, args: argparse.Namespace) -> int:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="python -m app.bot", description="Локальный запуск MAX-бота")
     commands = parser.add_subparsers(dest="command")
-    commands.add_parser("polling", help="long polling (по умолчанию)")
+    polling = commands.add_parser("polling", help="long polling (по умолчанию)")
+    polling.add_argument("--text-only", action="store_true", help="do not initialize local ASR")
     webhook = commands.add_parser("webhook", help="локальный HTTP-сервер для webhook MAX")
+    webhook.add_argument("--text-only", action="store_true", help="do not initialize local ASR")
     webhook.add_argument("--host", default="127.0.0.1")
     webhook.add_argument("--port", type=int, default=8080)
     webhook.add_argument("--path", default="/max/webhook")
@@ -250,6 +260,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.command is None:
         args.command = "polling"
+        args.text_only = False
     return args
 
 
@@ -278,13 +289,13 @@ async def diagnose(args: argparse.Namespace) -> int:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-    # httpx logs every request URL at INFO; media URLs may carry access tokens, chat ids are personal.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.basicConfig(level=logging.WARNING, format="%(message)s")
+    logging.getLogger("it_gorky").setLevel(logging.INFO)
     try:
         raise SystemExit(asyncio.run(main()))
     except KeyboardInterrupt:
         raise SystemExit(130) from None
-    except ValueError as error:
-        # Settings errors; messages are fixed texts and never contain the token.
-        raise SystemExit(f"Некорректные настройки бота: {error}") from None
+    except Exception:
+        # Validation and provider errors may contain secrets or complete requests.
+        log_event("bot_start_or_runtime_failed")
+        raise SystemExit(1) from None

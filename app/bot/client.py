@@ -246,6 +246,41 @@ class MaxClient:
                 delay *= 2
         return result
 
+    async def edit_text(self, *, message_id: str, text: str) -> SendResult:
+        """PUT /messages returns {success: bool}, not a Message. Replace a fresh status.
+
+        Repeating a PUT to the same ID with the same text is safe. A reply longer than
+        the API limit falls back to split sends at the service boundary.
+        """
+        if not message_id or not text.strip() or len(text) > MAX_TEXT_LENGTH:
+            return SendResult("permanent_failure", error_code="invalid_edit")
+        delay = RETRY_DELAY_S
+        result = SendResult("retryable_failure", error_code="not_edited")
+        for attempt in range(SEND_ATTEMPTS):
+            try:
+                response = await self._http.put(
+                    "/messages", params={"message_id": message_id}, json={"text": text}
+                )
+            except httpx.TransportError as error:
+                result = SendResult("retryable_failure", error_code=transport_error_code(error))
+            else:
+                if response.status_code == 200:
+                    try:
+                        payload = response.json()
+                    except ValueError:
+                        return SendResult("unknown", error_code="invalid_response")
+                    if isinstance(payload, dict) and payload.get("success") is True:
+                        return SendResult("delivered", external_message_id=message_id)
+                    return SendResult("permanent_failure", error_code="edit_rejected")
+                if response.status_code == 429 or response.status_code >= 500:
+                    result = SendResult("retryable_failure", error_code=f"http_{response.status_code}")
+                else:
+                    return SendResult("permanent_failure", error_code=f"http_{response.status_code}")
+            if attempt + 1 < SEND_ATTEMPTS:
+                await asyncio.sleep(delay)
+                delay *= 2
+        return result
+
     async def download_audio(self, url: str) -> bytes:
         """Stream audio from an allowed HTTPS host with a size limit; redirects are re-checked."""
         hosts = self._settings.audio_hosts

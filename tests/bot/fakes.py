@@ -14,17 +14,26 @@ NOW = datetime(2026, 10, 25, 9, 30, tzinfo=UTC)
 class FakeSender:
     def __init__(self) -> None:
         self.sent: list[tuple[str, str]] = []
+        self.edited: list[tuple[str, str]] = []
+        self.actions: list[str] = []
+        self.edit_result = SendResult("delivered", external_message_id="mid.1")
+        self.result = SendResult("delivered", external_message_id="mid.1")
         self.buttons: list[tuple[tuple[str, str], ...]] = []
         self.deleted: list[str] = []
         self.answered: list[str] = []
-        self.result = SendResult("delivered", external_message_id="mid.status")
 
     async def send_text(
         self, *, chat_id: str, text: str, buttons: tuple[tuple[str, str], ...] = ()
     ) -> SendResult:
         self.sent.append((chat_id, text))
+        self.actions.append(text)
         self.buttons.append(buttons)
         return self.result
+
+    async def edit_text(self, *, message_id: str, text: str) -> SendResult:
+        self.edited.append((message_id, text))
+        self.actions.append(text)
+        return self.edit_result
 
     async def delete_message(self, *, message_id: str) -> str:
         self.deleted.append(message_id)
@@ -36,7 +45,8 @@ class FakeSender:
 
     @property
     def texts(self) -> list[str]:
-        return [text for _, text in self.sent]
+        # Attempted text updates, in order; sent/edited distinguish transport calls.
+        return self.actions.copy()
 
 
 class FakeGate:

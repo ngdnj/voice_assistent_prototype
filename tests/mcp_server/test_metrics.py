@@ -43,7 +43,7 @@ class MetricsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(RECORD_OPERATIONS._labelnames, ("operation", "transport", "outcome"))
 
     async def test_process_exposes_metrics_endpoint(self) -> None:
-        app = build_app(EventTools(None, None, None), McpSettings(service_token="t" * 32))  # type: ignore[arg-type]
+        app = build_app(EventTools(None, None, None, None), McpSettings(service_token="t" * 32))  # type: ignore[arg-type]
         await measured("test_op", "rest", self._ok)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"

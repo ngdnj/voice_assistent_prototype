@@ -1,4 +1,4 @@
-"""FastMCP server with the three MVP tools; the model never chooses the owner or the action ID."""
+"""FastMCP tools; the model never chooses the owner or the action ID."""
 
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Any
@@ -15,6 +15,7 @@ from app.mcp_server.context import TrustedContext, UnauthorizedError, context_fr
 from app.mcp_server.metrics import measured
 from app.mcp_server.schemas import error
 from app.mcp_server.tools import EventTools
+from app.planner.query import RECORD_SORTS
 
 ContextProvider = Callable[[], TrustedContext]
 
@@ -38,6 +39,17 @@ EventTypesArg = Annotated[
 ]
 MomentArg = Annotated[
     str | None, Field(description="ISO 8601 с UTC или смещением, например 2026-10-24T15:00:00+03:00")
+]
+SortArg = Annotated[
+    str | None,
+    Field(
+        description=(
+            "Порядок: time_asc (по умолчанию), time_desc; duration_asc/duration_desc — "
+            "сначала короткие/длинные встречи, неизвестная длительность в конце; "
+            "name_asc/name_desc — название; created_asc/created_desc — время добавления"
+        ),
+        json_schema_extra={"enum": list(RECORD_SORTS)},
+    ),
 ]
 
 
@@ -133,11 +145,20 @@ def build_mcp_server(tools: EventTools, context: ContextProvider) -> FastMCP:
         start_time: Annotated[str, Field(description="Начало периода включительно, ISO 8601 со смещением")],
         end_time: Annotated[str, Field(description="Конец периода не включительно, ISO 8601 со смещением")],
         event_types: EventTypesArg = None,
+        sort: SortArg = None,
+        limit: Annotated[int | None, Field(description="Число записей, 1–100, по умолчанию 100")] = None,
     ) -> dict[str, Any]:
         return await run(
             "get_events_by_period",
             lambda caller: tools.get_events_by_period(
-                caller, {"start_time": start_time, "end_time": end_time, "event_types": event_types}
+                caller,
+                {
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "event_types": event_types,
+                    "sort": sort,
+                    "limit": limit,
+                },
             ),
         )
 
@@ -156,6 +177,7 @@ def build_mcp_server(tools: EventTools, context: ContextProvider) -> FastMCP:
         limit: Annotated[
             int | None, Field(description="Сколько записей вернуть, 1–50, по умолчанию 10")
         ] = None,
+        sort: SortArg = None,
     ) -> dict[str, Any]:
         return await run(
             "get_event_by_query",
@@ -167,8 +189,80 @@ def build_mcp_server(tools: EventTools, context: ContextProvider) -> FastMCP:
                     "start_time": start_time,
                     "end_time": end_time,
                     "limit": limit,
+                    "sort": sort,
                 },
             ),
         )
+
+    @mcp.tool(
+        description=(
+            "Изменить время существующей встречи, не создавая новую. Сначала найди id поиском или в истории; "
+            "если совпадений несколько — уточни выбор. meeting_id — UUID встречи. datetime — новое начало, "
+            "end_time — новое окончание; хотя бы одно обязательно. Только начало сохраняет известную "
+            "длительность; неизвестное окончание не назначается. Только окончание сохраняет начало. "
+            'Результат: {"updated": запись} или {"error": ...}. Подтверждай перенос только после updated.'
+        )
+    )
+    async def reschedule_meeting(
+        meeting_id: Annotated[
+            str, Field(description="id существующей встречи из результата поиска или истории")
+        ],
+        datetime: MomentArg = None,
+        end_time: MomentArg = None,
+    ) -> dict[str, Any]:
+        return await run(
+            "reschedule_meeting",
+            lambda caller: tools.reschedule_meeting(
+                caller,
+                {
+                    "meeting_id": meeting_id,
+                    "datetime": datetime,
+                    "end_time": end_time,
+                },
+            ),
+        )
+
+    @mcp.tool(
+        description=(
+            "Изменить название и/или время существующей задачи, встречи или напоминания. "
+            "Сначала найди запись поиском или в истории; при нескольких совпадениях уточни выбор. "
+            "Не создаёт новую запись. name — новое название; datetime — новое начало встречи/время "
+            "напоминания/срок задачи; date — только дата задачи, не вместе с datetime; end_time — "
+            "только окончание встречи. Новое начало сохраняет известную длительность при пропуске end_time. "
+            'Нужно хотя бы одно изменение. Успех: {"updated": запись}, ошибка: {"error": ...}.'
+        )
+    )
+    async def update_event(
+        event_id: Annotated[str, Field(description="UUID записи из поиска/истории; не придумывай ID")],
+        name: Annotated[str | None, Field(description="Новое название, 1–200 символов")] = None,
+        datetime: MomentArg = None,
+        date: Annotated[str | None, Field(description="Новый срок задачи без времени, YYYY-MM-DD")] = None,
+        end_time: MomentArg = None,
+    ) -> dict[str, Any]:
+        return await run(
+            "update_event",
+            lambda caller: tools.update_event(
+                caller,
+                {
+                    "event_id": event_id,
+                    "name": name,
+                    "datetime": datetime,
+                    "date": date,
+                    "end_time": end_time,
+                },
+            ),
+        )
+
+    @mcp.tool(
+        description=(
+            "Удалить одну существующую запись по явной просьбе пользователя. Найди её ID поиском или "
+            "в истории; при нескольких совпадениях сначала уточни выбор. Запись исчезает из доступных "
+            'списков и поиска. Подтверждай только после {"deleted": запись}; ошибка: {"error": ...}.'
+        )
+    )
+    async def delete_event(
+        event_id: Annotated[str, Field(description="UUID записи из поиска/истории; не придумывай ID")],
+    ) -> dict[str, Any]:
+        return await run("delete_event", lambda caller: tools.delete_event(caller, {"event_id": event_id}))
 
     return mcp

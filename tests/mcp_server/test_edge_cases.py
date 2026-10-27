@@ -3,7 +3,7 @@
 import asyncio
 import unittest
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 from fastmcp import Client
@@ -13,6 +13,7 @@ from app.mcp_server.__main__ import build_tools
 from app.mcp_server.context import TrustedContext
 from app.mcp_server.server import build_mcp_server
 from app.mcp_server.tools import EventTools
+from app.planner.event_service import EventService
 from app.planner.meeting_service import MeetingService
 from app.planner.query import RecordQuery
 from app.planner.reminder_service import ReminderService
@@ -31,7 +32,12 @@ class McpArgumentEdgeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.repository = InMemoryTaskRepository()
         tasks = TaskService(repository=self.repository, clock=lambda: NOW)
-        tools = EventTools(tasks, AsyncMock(spec=MeetingService), AsyncMock(spec=ReminderService))
+        tools = EventTools(
+            tasks,
+            AsyncMock(spec=MeetingService),
+            AsyncMock(spec=ReminderService),
+            AsyncMock(spec=EventService),
+        )
         context = TrustedContext(
             owner_id="user-42", timezone="Europe/Moscow", request_id="r", action_id="a:1"
         )
@@ -88,7 +94,8 @@ class McpPostgresEdgeTests(unittest.IsolatedAsyncioTestCase):
         self.sessions = session_factory(engine)
         self.owner = f"test-{uuid4()}"
         self.addAsyncCleanup(self.cleanup)
-        self.tools = build_tools(self.sessions)
+        with patch("app.mcp_server.__main__.clock", return_value=NOW):
+            self.tools = build_tools(self.sessions)
         self.actions = 0
 
     async def cleanup(self) -> None:

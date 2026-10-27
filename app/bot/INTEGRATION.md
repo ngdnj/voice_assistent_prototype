@@ -1,10 +1,26 @@
 # Интеграция с ролью 2: MAX bot
 
-> **Статус: v1 — основной сценарий бота реализован** (`app/bot/`, локальный запуск `python -m app.bot`).
+> **Статус: v2.2 — ответ заменяет статус обработки** (`app/bot/`, локальный запуск `python -m app.bot`).
 > Потребитель потока уведомлений (раздел 6) ещё не реализован. Изменения — только через журнал версий.
 
 Документ для разработчиков и их агентов: ролей 1 (агент, worker, dispatcher, сборка API), 3 (ASR),
 4 (MCP, REST, initData), 5 (Mini App), 6 (метрики). Внутренние правила роли 2 — в [`AGENTS.md`](AGENTS.md).
+
+Изменение v2.2 (2026-10-26): `Sender` дополнен
+`async edit_text(*, message_id: str, text: str) -> SendResult`.
+Роль 1 при подстановке отправителя реализует оба метода; роль 6 учитывает `purpose="edit"`
+в существующих send-метриках. Другие роли не меняют входной контракт.
+BotService сохраняет ID сообщения «Принял запрос…» в текущем задании и заменяет его
+ответом, уточнением или ошибкой. При отказе MAX/отсутствующем ID/ответе длиннее 4000
+символов используется обычная отправка (длинный ответ разбивается); backend повторно
+не запускается. Неопределённый результат редактирования с последующей отправкой может
+дать два одинаковых текста. После аварии статус может остаться: runner пока в памяти.
+
+Клиент использует [официальный PUT /messages](https://dev.max.ru/docs-api/methods/PUT/messages),
+`message_id` в query, `text` в JSON, успех только при `success: true`.
+Повтор PUT с тем же ID и текстом ограничен SEND_ATTEMPTS и безопасен для операции
+замены. Обычная отправка с неопределённым сетевым исходом по-прежнему не ретраится.
+Статус редактируется один раз за запрос; при 429 применяется существующий backoff.
 
 Сверено с документацией MAX на 2026-10-25: [`POST /subscriptions`](https://dev.max.ru/docs-api/methods/POST/subscriptions),
 [`POST /messages`](https://dev.max.ru/docs-api/methods/POST/messages), объекты
@@ -15,7 +31,7 @@
 
 | Роль | Что нужно для интеграции | Раздел |
 | --- | --- | --- |
-| 1 | Реализовать `Backend.answer` поверх agent runner; смонтировать `webhook_router` в API; согласовать ключ `bot:busy` с состояниями диалога; заменить `BackgroundRunner` на jobs/outbox | 3, 4, 5, 10 |
+| 1 | `AgentBackend` подключён; дальше смонтировать `webhook_router` в общий API, согласовать состояния диалога и заменить `BackgroundRunner` на jobs/outbox | 3, 4, 5, 10 |
 | 3 | Ничего нового: бот вызывает `SpeechRecognizer.transcribe(audio, suffix)` и обрабатывает его ошибки по `docs/ML.md` §1 | 4 |
 | 4 | Ничего нового: владелец — `str(user_id)` MAX, как в `initData`; `MAX_BOT_TOKEN` общий | 1, 7 |
 | 5 | Ничего нового в этой версии | — |
@@ -42,10 +58,11 @@ bot_started или /start ─▶ приветствие
   и записи каналов без отправителя игнорируются.
 - Подтверждение создания формирует backend по результату инструмента; бот отправляет его текст как есть.
 - Ответ backend может быть `Reply(text, buttons)`: кнопки-callback в одну строку под последним сообщением.
-  Сейчас демо-backend отвечает «Вы сказали: …\nВсе верно?» с кнопками «Да, все верно» (`confirm:yes`,
-  пока без действия, нажатие только подтверждается через `POST /answers`) и «Нет» (`confirm:no` →
-  «Повторите запрос.», следующее сообщение — обычный новый запрос).
-- Сообщение «Принял запрос, обрабатываю…» удаляется (`DELETE /messages`) после отправки ответа или ошибки.
+  Кнопки «Да, все верно» (`confirm:yes`, пока без действия, нажатие только подтверждается через
+  `POST /answers`) и «Нет» (`confirm:no` → «Повторите запрос.», следующее сообщение — обычный новый запрос)
+  готовы в `CONFIRM_BUTTONS`. Демо-backend удалён (v2), `AgentBackend` сейчас возвращает текст без кнопок.
+- Обычный ответ или ошибка заменяют сообщение «Принял запрос, обрабатываю…» (`edit_text`, см. v2.2).
+  Ответ с кнопками приходит новым сообщением, а статус удаляется (`DELETE /messages`).
   Отдельного сообщения «Распознано: …» больше нет.
   Ошибка или пустой ответ backend — честное «Не получилось обработать запрос…».
 
@@ -81,19 +98,15 @@ class Backend(Protocol):
     async def answer(self, request: BackendRequest) -> str: ...
 ```
 
-Пример адаптера к `Assistant.handle` из `docs/ML.md` §1:
+Реализован `app.agent.bot_backend.AgentBackend`. Он передаёт owner_id, chat_id,
+text, reference_time и timezone без подмены. `request_id` используется для логов,
+`job_id` передаётся как operation_id хода и сохраняется при повторном `answer(request)`.
+Action_id отдельных MCP-вызовов строит агент из сохранённого плана этого хода.
 
 ```python
-class AgentBackend:
-    def __init__(self, assistant: Assistant) -> None:
-        self._assistant = assistant
-
-    async def answer(self, request: BackendRequest) -> str:
-        reply = await self._assistant.handle(
-            request.owner_id, request.text,
-            reference_time=request.reference_time, timezone=request.timezone,
-        )
-        return reply.text
+from app.agent.bot_backend import AgentBackend
+backend = AgentBackend(assistant)
+reply_text = await backend.answer(request)
 ```
 
 - Исключение из `answer` бот превращает в «Не получилось обработать запрос…» и снимает блокировку.
@@ -153,9 +166,11 @@ docker compose up -d --wait redis
 MAX_BOT_TOKEN=<токен тестового бота> uv run --locked --env-file .env python -m app.bot
 ```
 
-  В `python -m app.bot` подключён `DemoBackend`: он отвечает «Демо-режим: обработчик запросов ещё не
-  подключён…» и **не создаёт записей**. Это стенд для проверки сценария бота, не интеграция с агентом.
-  `BOT_DEMO_DELAY_S` (по умолчанию 0) задерживает демо-ответ, чтобы вручную проверить сообщение о занятости.
+  В `python -m app.bot` подключён настоящий `AgentBackend`: модель и MCP/PostgreSQL должны быть
+  настроены. Зависимости собираются один раз, Redis-клиент общий для бота и истории.
+  Для первого текста: `python -m app.bot polling --text-only`, без загрузки ASR.
+  `MAX_TEST_CHAT_ID` при заданном значении ограничивает обработку этим чатом: остальные
+  события игнорируются до дедупликации, блокировок и отправки любых статусов.
   Отклонённый домен аудио пишется в лог событием `audio_source_rejected` (только домен, без URL).
   Webhook и long polling одновременно не используются: при активной подписке отключите её перед polling.
 - **Локальный webhook-режим** (нужен для нативных голосовых: при long polling MAX присылает их пустыми,
@@ -209,6 +224,7 @@ uv run --locked --env-file .env python -m app.bot unsubscribe --url https://<т�
 | `BOT_PROCESSING_TIMEOUT_S` | `120` | предел ASR + backend на один запрос |
 | `BOT_BUSY_TTL_S` | `180` | TTL блокировки; должен превышать обработку и все попытки отправки |
 | `BOT_MAX_CONCURRENCY` | `8` | число одновременно обрабатываемых запросов в процессе |
+| `MAX_TEST_CHAT_ID` | пусто | необязательное ограничение локального запуска одним тестовым чатом |
 
 Переменные с безопасными значениями по умолчанию внесены в `.env.example` (блок «Role 2»).
 
@@ -256,7 +272,13 @@ uv run --locked --env-file .env python -m app.bot unsubscribe --url https://<т�
 | v1.2 | 2026-10-26 | Без изменения контракта: причина в логе `polling_failed` (`error_code`: `http_401`, `tls_certificate`, `connect_error`, `proxy_error`, `timeout`…), `MAX_CA_BUNDLE_FILE` |
 | v1.3 | 2026-10-26 | Без изменения контракта `Backend`: только смайлики → «Введите корректный запрос.»; аудиофайлы `file`; расшифровка MAX как запасной вариант; пустые `message_created` логируются; причина невалидного события в логе; проверка ASR при старте |
 | v1.4 | 2026-10-26 | Локальный webhook-режим `python -m app.bot webhook`, команды `subscribe` / `unsubscribe` / `subscriptions`, проверка формата `MAX_WEBHOOK_SECRET`, корректная остановка по сигналу в обоих режимах |
-| v1.5 | 2026-10-26 | Команда `doctor` для диагностики webhook-цепочки; лог `webhook_received`; расширенные причины ошибок аудио и ASR |
-| v1.6 | 2026-10-26 | Выбран GigaAM: `python -m app.bot` загружает модель в фоне при старте (`asr_warm_up_started` / `_finished` / `_failed`); запуск с `--extra asr` |
-| v1.7 | 2026-10-26 | По реальному событию: голосовые MAX отдаёт с `a.oneme.ru`, домен `oneme.ru` разрешён по умолчанию |
-| v1.8 | 2026-10-26 | `Backend.answer` возвращает `str` или `Reply(text, buttons)`; статус «Принял запрос…» удаляется после ответа; сообщение «Распознано» убрано; кнопки-callback «Да, все верно» / «Нет» (`confirm:yes` / `confirm:no`), событие `message_callback` (нужна переподписка), «Нет» → «Повторите запрос.» |
+
+| v2 | 2026-10-26 | Подключён AgentBackend: owner/chat/time/reference и operation_id от job_id. Точка запуска собирает настоящий агент/MCP/Redis, DemoBackend удалён. Режим --text-only, ограничение MAX_TEST_CHAT_ID, прерывание long poll и drain перед закрытием Redis; подробный запуск docs/live-bot.md. |
+
+| v2.1 | 2026-10-26 | Polling отказывается запускаться при активном webhook (polling_blocked_by_webhook), подписку автоматически не удаляет. Startup-событие помечает backend=agent. |
+
+| v2.2 | 2026-10-26 | `Sender.edit_text`, финальный ответ/уточнение/ошибка заменяют статус по message_id; безопасный fallback отправки, метрики purpose=edit. |
+| v2.3 | 2026-10-26 | Команда `doctor` для диагностики webhook-цепочки; лог `webhook_received`; расширенные причины ошибок аудио и ASR |
+| v2.4 | 2026-10-26 | Выбран GigaAM: `python -m app.bot` загружает модель в фоне при старте (`asr_warm_up_started` / `_finished` / `_failed`); запуск с `--extra asr` |
+| v2.5 | 2026-10-26 | По реальному событию: голосовые MAX отдаёт с `a.oneme.ru`, домен `oneme.ru` разрешён по умолчанию |
+| v2.6 | 2026-10-26 | `Backend.answer` возвращает `str` или `Reply(text, buttons)`; статус «Принял запрос…» удаляется после ответа с кнопками (обычный ответ по-прежнему заменяет статус, v2.2); сообщение «Распознано» убрано; кнопки-callback «Да, все верно» / «Нет» (`confirm:yes` / `confirm:no`), событие `message_callback` (нужна переподписка), «Нет» → «Повторите запрос.» |
