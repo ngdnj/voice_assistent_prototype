@@ -56,3 +56,11 @@ def test_next_weekday_is_a_ready_date_after_today() -> None:
     assert "- во вторник: 2026-10-20" in monday
     friday = render_system_prompt(datetime(2026, 10, 23, 12, tzinfo=MOSCOW), MOSCOW)
     assert "- в пятницу: 2026-10-30" in friday
+
+
+@pytest.mark.parametrize("day", [19, 22, 25])  # Monday, Thursday, Sunday of the week 19-25.10
+def test_next_friday_is_in_the_next_calendar_week(day: int) -> None:
+    """User's decision 27.10: «в следующую пятницу» is the Friday of the next week, here 30.10."""
+    prompt = render_system_prompt(datetime(2026, 10, day, 12, tzinfo=MOSCOW), MOSCOW)
+    assert "- в следующую пятницу: 2026-10-30" in prompt
+    assert "- в следующий понедельник: 2026-10-26" in prompt

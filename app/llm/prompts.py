@@ -74,6 +74,8 @@ SYSTEM_PROMPT = """\
 Сегодня: {weekday}
 Ближайший день недели («в пятницу» — ближайшая пятница после сегодня):
 {next_weekdays}
+На следующей неделе («в следующую пятницу» — пятница следующей недели):
+{next_week_days}
 Через сколько (уже посчитано, с учётом перехода через полночь):
 {offsets}
 Готовые периоды [start_time, end_time):
@@ -212,6 +214,26 @@ def _next_weekdays(now: datetime) -> str:
     return "\n".join(lines)
 
 
+WEEKDAYS_NEXT = (
+    "в следующий понедельник",
+    "в следующий вторник",
+    "в следующую среду",
+    "в следующий четверг",
+    "в следующую пятницу",
+    "в следующую субботу",
+    "в следующее воскресенье",
+)
+
+
+def _next_week_days(now: datetime) -> str:
+    """«В следующую пятницу» is the Friday of the next calendar week (user's decision 27.10): on Monday
+    19.10 it is 30.10, not 23.10. Without a ready date GigaChat put it on Saturday 31.10 in 3 of 3 runs.
+    """
+    monday = now.date() - timedelta(days=now.weekday()) + timedelta(days=7)
+    days = (monday + timedelta(days=i) for i in range(7))
+    return "\n".join(f"- {WEEKDAYS_NEXT[day.weekday()]}: {day.isoformat()}" for day in days)
+
+
 def _date_offsets(now: datetime) -> str:
     lines = []
     for (months, days), phrase in DATE_OFFSETS:
@@ -239,6 +261,7 @@ def render_system_prompt(reference_time: datetime, tz: ZoneInfo, *, enable_delet
         offsets=_offsets(now),
         date_offsets=_date_offsets(now),
         next_weekdays=_next_weekdays(now),
+        next_week_days=_next_week_days(now),
         periods=_periods(now),
         calendar=_calendar(now, range(CALENDAR_DAYS)),
         # Past days go last and separately: listed before today they shift the model's weekdays by one.

@@ -456,13 +456,13 @@ TUNE_EXTRA: list[Case] = [
         ["Напомни завтра в 15, нет, в 16 часов позвонить в банк"],
         created(equals("event_type", "reminder"), at("datetime", "2026-10-20T16:00:00+03:00")),
     ),
-    # "в следующую пятницу" on a Monday: this week's or next week's Friday.
     # The policy is not fixed yet, so both are accepted.
     Case(
         "next_friday",
         "create",
         ["Поставь встречу с Сашей в следующую пятницу в 12"],
-        created(equals("event_type", "meeting"), on_date("datetime", "2026-10-23", "2026-10-30")),
+        # «Следующая пятница» — the Friday of the next calendar week (user's decision 27.10).
+        created(equals("event_type", "meeting"), on_date("datetime", "2026-10-30")),
     ),
     Case(
         "remind_yesterday_asks",
