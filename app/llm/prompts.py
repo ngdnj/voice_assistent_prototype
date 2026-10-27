@@ -8,6 +8,7 @@ The time block goes last: providers cache the longest identical prefix of a requ
 so static rules first and per-request data at the end keep the rules cached.
 """
 
+import calendar
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -36,6 +37,11 @@ SYSTEM_PROMPT = """\
 12. Время словами — такое же точное указание, как цифрами. «С часу до пяти» без указания ночи в дневной встрече означает 13:00–17:00; «с часу дня» — 13:00; «в пять вечера» — 17:00; «в половине третьего дня», «в полтретьего дня» — 14:30; «без четверти шесть вечера» — 17:45; «в четверть шестого вечера» — 17:15. Не спрашивай снова уже названное время. Если из контекста нельзя различить утро и вечер (например, отдельное «в пять»), уточни часть суток. «Вечером» без часа требует уточнения. Неоднозначное или несуществующее время при переходе часов также требует уточнения, а не догадки.
 13. Списки: сортировка sort по умолчанию time_asc — по возрастанию даты/времени. «Сначала дальние», «от поздних к ранним», «даты по убыванию» — time_desc. «Сначала длинные встречи» — duration_desc, «короткие» — duration_asc. «По алфавиту» — name_asc, «в обратном алфавитном порядке» — name_desc. «Недавно добавленные», «новые сначала» — created_desc, «сначала давно добавленные» — created_asc. Не путай дату события с датой добавления. Передавай sort в get_events_by_period или get_event_by_query; если пользователь просит N записей — также limit=N в допустимых пределах. При просьбе «теперь по длительности», «а в обратном порядке» повтори предыдущую выборку с прежними типами/периодом/поиском и новым sort, не создавай записи. Длительность известна только у встреч с окончанием; остальным её не придумывай. Если сказано только «по длительности», используй duration_desc. Учитывай event_types: «какие напоминания» — только reminder, «какие встречи» — только meeting.
 14. Если пользователь не ограничивал количество, limit опусти. У напоминаний и задач нет длительности: если просят упорядочить только их по длительности, объясни это и предложи порядок по времени. Приоритет у записей не задан: не выдумывай сортировку по важности.
+15. Конец встречи (end_time) — только если пользователь назвал конец или длительность («с 15 до 17», «на два часа»). Иначе не передавай.
+16. Если пользователь сказал «сегодня», а это время уже прошло, — сразу спроси «9:15 уже прошло, поставить на завтра?». Тип записи при этом не уточняй.
+17. Вопрос о задачах без периода («какие у меня задачи», «что мне надо сделать») — get_events_by_period за «эта неделя, с сегодня» с event_types task. Задачи без срока туда не попадают: скажи об этом и предложи найти их по слову.
+18. Событие в назначенное время без слова «напомни» (лекция, тренировка, приём у врача) — meeting, тип не уточняй.
+19. «Через N дней», «через неделю», «через месяц», «через полгода», «через год» — это дата, а не время: бери её из блока «Через сколько дней». Задаче передай date; для встречи и напоминания без названного часа спроси время.
 
 Примеры решений:
 - «В среду надо оплатить счёт» — task с date среды, без datetime, создать сразу, ничего не спрашивать.
@@ -45,6 +51,8 @@ SYSTEM_PROMPT = """\
 - «Напомни завтра 5 вечера позвонить врачу» — reminder завтра 17:00:00, время уже указано: создать сразу. Передать event_type, name и datetime; date и end_time пропустить.
 - «Через полчаса надо выключить духовку» — reminder на значение «через 30 минут» из блока ниже, в ответе назвать это время по часам, а не «через полчаса».
 - «Созвон с Петей в субботу» — meeting без времени: не создавать, спросить «Во сколько созвон с Петей?».
+- «Планёрка в среду с 9 до 10» — meeting, datetime среды 09:00:00, end_time 10:00:00.
+- «Обед с Катей в четверг в 13» — meeting на 13:00:00 без end_time: длительность не названа.
 - «Завтра встреча с часу до пяти по обсуждению хакатона» — meeting завтра 13:00–17:00, создать без повторного вопроса о начале.
 - «Перенеси обсуждение хакатона на завтра в три часа дня» — найти встречу, reschedule_meeting на завтра 15:00 без end_time; известная длительность сохранится.
 - «Переименуй встречу про хакатон в Обсуждение проекта» — найти по «хакатон», update_event с event_id и name="Обсуждение проекта"; время сохранить.
@@ -64,6 +72,8 @@ SYSTEM_PROMPT = """\
 Часовой пояс пользователя: {tz_name}
 Время запроса: {now_iso}
 Сегодня: {weekday}
+Ближайший день недели («в пятницу» — ближайшая пятница после сегодня):
+{next_weekdays}
 Через сколько (уже посчитано, с учётом перехода через полночь):
 {offsets}
 Готовые периоды [start_time, end_time):
@@ -72,6 +82,8 @@ SYSTEM_PROMPT = """\
 {calendar}
 Прошедшие дни:
 {past_calendar}
+Через сколько дней (дата, время не входит; день недели сверяй с календарём выше):
+{date_offsets}
 """
 
 
@@ -125,7 +137,11 @@ def _periods(now: datetime) -> str:
         ("следующая неделя", monday + timedelta(days=7), monday + timedelta(days=14)),
         ("прошлая неделя", monday - timedelta(days=7), monday),
     )
-    return "\n".join(f"- {name}: {start(first)} — {start(end)}" for name, first, end in periods)
+    lines = [f"- {name}: {start(first)} — {start(end)}" for name, first, end in periods]
+    # A task deadline is a date, not a period end: "до конца недели" is Sunday, not next Monday.
+    sunday = monday + timedelta(days=6)
+    lines.append(f"- срок задачи «до конца недели»: date {sunday.isoformat()} ({WEEKDAYS_RU[6]})")
+    return "\n".join(lines)
 
 
 # Phrases users say for "in N minutes". Models add hours badly, especially across midnight,
@@ -152,6 +168,58 @@ def _offsets(now: datetime) -> str:
     return "\n".join(lines)
 
 
+# "Через месяц" and longer: a date, never a moment (the user named no hour). Months are calendar
+# months; a day that the target month lacks moves to its last day (31.01 + 1 month = 28.02 or 29.02).
+DATE_OFFSETS = (
+    ((0, 1), "через день"),
+    ((0, 2), "через 2 дня"),
+    ((0, 3), "через 3 дня"),
+    ((0, 7), "через неделю"),
+    ((0, 14), "через 2 недели"),
+    ((1, 0), "через месяц"),
+    ((2, 0), "через 2 месяца"),
+    ((3, 0), "через 3 месяца"),
+    ((6, 0), "через полгода"),
+    ((12, 0), "через год"),
+)
+
+
+def add_months(day: date, months: int) -> date:
+    month_index = day.month - 1 + months
+    year, month = day.year + month_index // 12, month_index % 12 + 1
+    return date(year, month, min(day.day, calendar.monthrange(year, month)[1]))
+
+
+WEEKDAYS_ACC = (
+    "в понедельник",
+    "во вторник",
+    "в среду",
+    "в четверг",
+    "в пятницу",
+    "в субботу",
+    "в воскресенье",
+)
+
+
+def _next_weekdays(now: datetime) -> str:
+    """«В пятницу» as a ready date. With the longer prompt of 26.10 GigaChat put «в пятницу» on Saturday
+    in 3 of 6 runs although the calendar was there: a direct lookup is more reliable than a search in it.
+    """
+    lines = []
+    for offset in range(1, 8):
+        day = now.date() + timedelta(days=offset)
+        lines.append(f"- {WEEKDAYS_ACC[day.weekday()]}: {day.isoformat()}")
+    return "\n".join(lines)
+
+
+def _date_offsets(now: datetime) -> str:
+    lines = []
+    for (months, days), phrase in DATE_OFFSETS:
+        day = add_months(now.date(), months) + timedelta(days=days)
+        lines.append(f"- {phrase}: {day.isoformat()} ({WEEKDAYS_RU[day.weekday()]})")
+    return "\n".join(lines)
+
+
 def user_timezone(name: str) -> ZoneInfo:
     """IANA zone from the user profile; an unknown name is an error, not a silent default."""
     try:
@@ -169,6 +237,8 @@ def render_system_prompt(reference_time: datetime, tz: ZoneInfo, *, enable_delet
         now_iso=now.isoformat(timespec="seconds"),
         weekday=WEEKDAYS_RU[now.weekday()],
         offsets=_offsets(now),
+        date_offsets=_date_offsets(now),
+        next_weekdays=_next_weekdays(now),
         periods=_periods(now),
         calendar=_calendar(now, range(CALENDAR_DAYS)),
         # Past days go last and separately: listed before today they shift the model's weekdays by one.

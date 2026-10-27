@@ -20,6 +20,9 @@ def summarize(results: Iterable[dict[str, Any]]) -> dict[str, Any]:
     items = list(results)
     scored = [r for r in items if not r["infra_error"]]
     passed = sum(r["passed"] for r in scored)
+    # Reports written before the behaviour score and the cache count have neither field.
+    passed_behavior = sum(r.get("passed_behavior", r["passed"]) for r in scored)
+    cached = [r.get("cached_input_tokens", 0) for r in scored]
     by_category: dict[str, list[int]] = {}
     for r in scored:
         counts = by_category.setdefault(r["category"], [0, 0])
@@ -29,10 +32,14 @@ def summarize(results: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "n": len(scored),
         "passed": passed,
         "accuracy": passed / len(scored) if scored else 0.0,
+        "passed_behavior": passed_behavior,
+        "accuracy_behavior": passed_behavior / len(scored) if scored else 0.0,
         "infra_errors": len(items) - len(scored),
         "by_category": {c: {"passed": p, "n": n} for c, (p, n) in sorted(by_category.items())},
         "latency_s": describe([r["latency_s"] for r in scored]),
         "cost_rub": describe([r["cost_rub"] for r in scored]),
         "input_tokens": describe([r["input_tokens"] for r in scored]),
+        "cached_input_tokens": describe(cached),
+        "total_input_tokens": describe([r["input_tokens"] + c for r, c in zip(scored, cached, strict=True)]),
         "output_tokens": describe([r["output_tokens"] for r in scored]),
     }

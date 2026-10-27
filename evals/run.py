@@ -22,7 +22,7 @@ from typing import Any, get_args
 
 from langchain_core.language_models import BaseChatModel
 
-from app.agent.agent import AgentReply, Assistant, Pricing
+from app.agent.agent import AgentReply, Assistant, Pricing, ToolCall
 from app.agent.history import InMemoryChatHistory
 from app.config import Settings, get_settings
 from app.llm.model import build_chat_model
@@ -43,6 +43,7 @@ class CaseResult:
     id: str
     category: str
     split: str
+    # Strict: every expectation of the case holds.
     passed: bool
     errors: list[str]
     answer: str
@@ -51,24 +52,69 @@ class CaseResult:
     cost_rub: float
     input_tokens: int
     output_tokens: int
+    # By behaviour: a forbidden create_event that was rejected (by arg checks or the server) is not a
+    # failure, since the user's records did not change and the final answer is still checked.
+    passed_behavior: bool = False
+    behavior_errors: list[str] = field(default_factory=list)
+    # Prompt prefix served from the provider's cache; not in input_tokens and not billed by GigaChat.
+    cached_input_tokens: int = 0
     retried: bool = False
     # API/network failure, not a model mistake; excluded from accuracy.
     infra_error: bool = False
     timezone: str = ""
     turns: list[str] = field(default_factory=list)
+    # Per turn: what the user said, every tool call with the server's answer, the final reply.
+    trace: list[dict[str, Any]] = field(default_factory=list)
+
+
+TRACE_RESULT_CHARS = 300
+
+
+def _call_trace(call: ToolCall) -> dict[str, Any]:
+    result = json.dumps(call.result, ensure_ascii=False) if call.result is not None else "нет ответа"
+    return {"name": call.name, "args": call.args, "ok": call.ok, "result": result[:TRACE_RESULT_CHARS]}
+
+
+def build_trace(turns: list[str], replies: list[AgentReply]) -> list[dict[str, Any]]:
+    """The whole dialog of a case, for finding out *why* a check failed."""
+    return [
+        {
+            "user": text,
+            "calls": [_call_trace(c) for c in reply.tool_calls],
+            "answer": reply.text,
+            "retried": reply.retried,
+        }
+        for text, reply in zip(turns, replies, strict=True)
+    ]
+
+
+def format_trace(trace: list[dict[str, Any]]) -> list[str]:
+    lines = []
+    for i, step in enumerate(trace, 1):
+        lines.append(f"        {i}. пользователь: {step['user']}")
+        for call in step["calls"]:
+            mark = "ok" if call["ok"] else "ОШИБКА"
+            args = json.dumps(call["args"], ensure_ascii=False)
+            lines.append(f"           ↳ {call['name']}({args}) → {mark}: {call['result']}")
+        retried = " (после повтора guard)" if step["retried"] else ""
+        lines.append(f"           ответ{retried}: {step['answer']}")
+    return lines
 
 
 def _first_error(checks: list[Check], args: dict[str, Any]) -> str | None:
     return next((e for check in checks if (e := check(args))), None)
 
 
-def _evaluate(case: Case, reply: AgentReply) -> list[str]:
+def _evaluate(case: Case, reply: AgentReply, *, by_behavior: bool = False) -> list[str]:
+    """Errors of the last turn; `by_behavior` excuses forbidden changes that did not happen."""
     expect = case.expect
     errors: list[str] = []
     forbidden = set(expect.forbid)
     if expect.tool in {None, "get_events_by_period", "get_event_by_query"}:
         forbidden.update(MUTATING_TOOLS)
     for call in reply.tool_calls:
+        if by_behavior and call.name in MUTATING_TOOLS and not call.ok:
+            continue
         if call.name in forbidden:
             errors.append(f"не должно быть {call.name}, вызвано: {call.args}")
         if call.result is not None and "error" in call.result:
@@ -135,6 +181,7 @@ async def _run_case(case: Case, settings: Settings, model: BaseChatModel) -> Cas
 
     last = replies[-1]
     errors = _evaluate(case, last)
+    behavior_errors = _evaluate(case, last, by_behavior=True)
     return CaseResult(
         id=case.id,
         category=case.category,
@@ -142,14 +189,19 @@ async def _run_case(case: Case, settings: Settings, model: BaseChatModel) -> Cas
         passed=not errors,
         errors=errors,
         answer=last.text,
-        tool_calls=[{"name": c.name, "args": c.args} for c in last.tool_calls],
+        tool_calls=[{"name": c.name, "args": c.args, "ok": c.ok} for c in last.tool_calls],
         latency_s=sum(r.latency_s for r in replies),
         cost_rub=sum(r.cost_rub for r in replies),
         input_tokens=sum(r.input_tokens for r in replies),
         output_tokens=sum(r.output_tokens for r in replies),
+        passed_behavior=not behavior_errors,
+        behavior_errors=behavior_errors,
+        # The field comes with role 1's agent patch (docs/ML_PROPOSALS.md); without it the cache is 0.
+        cached_input_tokens=sum(getattr(r, "cached_input_tokens", 0) for r in replies),
         retried=any(r.retried for r in replies),
         timezone=case.timezone,
         turns=case.turns,
+        trace=build_trace(case.turns, replies),
     )
 
 
@@ -174,23 +226,34 @@ def _fmt(stats: dict[str, float], digits: int) -> str:
 
 
 def _print_summary(title: str, summary: dict[str, Any]) -> None:
-    print(f"\n== {title}: {summary['passed']}/{summary['n']} ({summary['accuracy']:.0%})")
+    print(
+        f"\n== {title}: {summary['passed']}/{summary['n']} ({summary['accuracy']:.0%}), "
+        f"по поведению {summary['passed_behavior']}/{summary['n']} ({summary['accuracy_behavior']:.0%})"
+    )
     for category, counts in summary["by_category"].items():
         print(f"   {category:<10} {counts['passed']}/{counts['n']}")
     if summary["infra_errors"]:
         print(f"   сбои API/сети, не учтены в точности: {summary['infra_errors']}")
     print(f"   латентность, с:    {_fmt(summary['latency_s'], 2)}")
     print(f"   стоимость, ₽:      {_fmt(summary['cost_rub'], 3)}")
-    print(f"   токены вход:       {_fmt(summary['input_tokens'], 0)}")
+    print(f"   токены вход:       {_fmt(summary['input_tokens'], 0)}  (без кэша, тарифицируются)")
+    print(f"   токены кэш:        {_fmt(summary['cached_input_tokens'], 0)}")
+    print(f"   токены вход всего: {_fmt(summary['total_input_tokens'], 0)}")
     print(f"   токены выход:      {_fmt(summary['output_tokens'], 0)}")
 
 
-def _print_report(results: list[CaseResult], summaries: dict[str, dict[str, Any]]) -> None:
+def _print_report(
+    results: list[CaseResult], summaries: dict[str, dict[str, Any]], trace: str = "off"
+) -> None:
     for r in results:
-        mark = ("ERR " if r.infra_error else "PASS" if r.passed else "FAIL") + ("↻" if r.retried else " ")
+        # BHV: strict failure, but no record changed and the answer is right (CaseResult.passed_behavior).
+        verdict = "PASS" if r.passed else "BHV " if r.passed_behavior else "FAIL"
+        mark = ("ERR " if r.infra_error else verdict) + ("↻" if r.retried else " ")
         print(f"[{mark}]{r.id:<34} {r.latency_s:5.1f}s {r.cost_rub:6.3f}₽  {r.answer[:70]!r}")
         for error in r.errors:
             print(f"        - {error}")
+        if trace == "all" or (trace == "failed" and not r.passed and not r.infra_error):
+            print("\n".join(format_trace(r.trace)))
     by_case: dict[str, list[CaseResult]] = {}
     for r in results:
         if not r.infra_error:
@@ -231,6 +294,14 @@ async def main() -> int:
         action="store_true",
         help="include deletion eval cases; the product agent already supports deletion",
     )
+    parser.add_argument(
+        "--trace",
+        nargs="?",
+        const="failed",
+        default="off",
+        choices=["off", "failed", "all"],
+        help="print each turn: tool calls with the server's answer and the reply (default: failed cases)",
+    )
     args = parser.parse_args()
 
     overrides: dict[str, Any] = {}
@@ -254,7 +325,8 @@ async def main() -> int:
         c
         for c in CASES
         if (not args.k or any(c.id.startswith(p) for p in args.k))
-        and (args.split == "all" or c.split == args.split)
+        # "all" is the measured §15 dataset; debug cases run only when asked for.
+        and (c.split == args.split or (args.split == "all" and (c.split != "debug" or args.k)))
         and (not args.category or c.category in args.category)
         and c.runs_with(settings.enable_delete_event)
     ]
@@ -275,9 +347,12 @@ async def main() -> int:
     results = await asyncio.gather(*(bounded(c) for c in cases for _ in range(args.repeat)))
     rows = [asdict(r) for r in results]
     summaries = {split: summarize(r for r in rows if r["split"] == split) for split in get_args(Split)}
+    # Debug cases are hard on purpose: keep them out of the overall accuracy.
+    measured = [r for r in rows if r["split"] != "debug"]
     summaries = {k: v for k, v in summaries.items() if v["n"] or v["infra_errors"]}
-    summaries["all"] = summarize(rows)
-    _print_report(results, summaries)
+    if measured:
+        summaries["all"] = summarize(measured)
+    _print_report(results, summaries, args.trace)
 
     REPORTS_DIR.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -287,6 +362,8 @@ async def main() -> int:
         "temperature": settings.llm_temperature,
         "repeat": args.repeat,
         "enable_delete": settings.enable_delete_event,
+        # Older reports may say "stub" (the SQLite test double); evals.summary keeps them apart.
+        "mcp": "postgres",
         "filter": {"split": args.split, "category": args.category, "k": args.k},
         "pricing_rub_per_1k": {"input": settings.pricing[0], "output": settings.pricing[1]},
         "summary": summaries,

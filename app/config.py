@@ -38,9 +38,13 @@ class Settings(BaseSettings):
     # folder_id is needed only for a user account (IAM token), not for a service account key.
     yandex_api_key: SecretStr | None = None
     yandex_folder_id: str | None = None
+    # Backup for the local GigaAM: "yandex" sends a message to SpeechKit when GigaAM already holds
+    # asr_overflow_queue messages or fails (app/asr/overflow.py). Costs money only at peaks.
+    asr_overflow: Literal["none", "yandex"] = "none"
+    # About 0.8 s of waiting per queued message on 2 vCPU (evals/asr_load.py): 4 keeps it near 4 s.
+    asr_overflow_queue: int = 4
 
-    # Dialog context
-    redis_url: str | None = "redis://localhost:6379/0"
+    # Dialog context of role 1's agent (app/agent/history.py); Redis comes from the shared REDIS_* block.
     # Stored turns per dialog; what goes into the prompt is further cut by the token budget.
     history_max_turns: int = 20
     history_max_tokens: int = 3000
