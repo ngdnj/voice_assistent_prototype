@@ -11,6 +11,12 @@ const STATUS_LABELS: Record<TaskStatus, string> = {
   done: "Выполнена",
 };
 
+const TYPE_ICON: Record<EventRecord["event_type"], string> = {
+  task: "📋",
+  meeting: "🤝",
+  reminder: "⏰",
+};
+
 function formatMoment(event: EventRecord): string {
   if (event.datetime) {
     return new Date(event.datetime).toLocaleString("ru-RU", {
@@ -31,7 +37,12 @@ function formatMoment(event: EventRecord): string {
 
 export function EventList({ events, onStatusChange }: EventListProps) {
   if (events.length === 0) {
-    return <p className="empty-state">Записей нет</p>;
+    return (
+      <div className="empty-state">
+        <span className="empty-icon">🗂️</span>
+        <p>Здесь пока пусто</p>
+      </div>
+    );
   }
 
   return (
@@ -39,11 +50,15 @@ export function EventList({ events, onStatusChange }: EventListProps) {
       {events.map((event) => (
         <li key={event.id} className="event-card">
           <div className="event-card-main">
-            <span className="event-name">{event.name}</span>
-            <span className="event-moment">{formatMoment(event)}</span>
+            <span className="event-icon">{TYPE_ICON[event.event_type]}</span>
+            <div className="event-text">
+              <span className="event-name">{event.name}</span>
+              <span className="event-moment">{formatMoment(event)}</span>
+            </div>
           </div>
           {event.event_type === "task" && event.status && (
             <select
+              className={`status-select status-${event.status}`}
               value={event.status}
               onChange={(e) =>
                 onStatusChange(event.id, e.target.value as TaskStatus)
