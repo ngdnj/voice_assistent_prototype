@@ -207,14 +207,32 @@ UNDATED_TASKS_NOTE = (
 )
 
 
-def annotate_result(tool_name: str, args: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
-    """Add what the model must say but cannot see in the result.
+# The search is lexical (PostgreSQL FTS): «созвон» does not find «Звонок», «зубной» does not find
+# «стоматолог». One retry with other words of the same meaning covers most of these misses without
+# embeddings (user's choice 27.10). This is not semantic search and is not called so.
+# The search needs every word of the query (websearch_to_tsquery), so the retry joins the words and their
+# synonyms with «or»: «созвон бухгалтер» repeated as «бухгалтер созвон» still missed «Звонок бухгалтеру».
+SEARCH_RETRY_HINT = (
+    "По этим словам ничего не найдено: поиск требует совпадения всех слов. Если ещё не повторял поиск, "
+    "повтори get_event_by_query один раз: в query перечисли через or ключевые слова и их синонимы, "
+    "каждый вариант — одно слово, например «созвон or звонок or бухгалтер», без слов «задача», «встреча», "
+    "«напоминание». "
+    "Если и так пусто — скажи пользователю, что не нашлось, и ничего не придумывай."
+)
 
-    The server selects tasks by deadline, so a list of tasks for a period never has the ones without
-    one (INTEGRATION.md §3). A prompt rule alone did not make GigaChat say so (T3: 0/6 in evals, 6/6
-    with this note). Only for task-only requests, not for «что у меня сегодня».
+
+def annotate_result(tool_name: str, args: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    """Add what the model must do or say but cannot see in the result.
+
+    - The server selects tasks by deadline, so a list of tasks for a period never has the ones without
+      one (INTEGRATION.md §3). A prompt rule alone did not make GigaChat say so (T3: 0/6 in evals, 6/6
+      with this note). Only for task-only requests, not for «что у меня сегодня».
+    - An empty search gets a hint to retry once with synonyms (`search_hint`: a key apart from `note`,
+      which role 1's list output turns into the sentence about tasks without a deadline).
     """
     tasks_only = args.get("event_types") == ["task"]
     if tool_name == "get_events_by_period" and tasks_only and "events" in result:
         return {**result, "note": UNDATED_TASKS_NOTE}
+    if tool_name == "get_event_by_query" and result.get("events") == []:
+        return {**result, "search_hint": SEARCH_RETRY_HINT}
     return result

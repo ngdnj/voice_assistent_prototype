@@ -101,6 +101,47 @@ index 7db30b1..72812a2 100644
      def _to_row(self, record: Meeting) -> dict[str, Any]:
          return {
              "id": record.id,
+diff --git a/app/storage/postgres/records.py b/app/storage/postgres/records.py
+index 9b57d72..0313373 100644
+--- a/app/storage/postgres/records.py
++++ b/app/storage/postgres/records.py
+@@ -9,12 +9,24 @@ from sqlalchemy import ColumnElement, Row, and_, case, func, literal, select
+ from sqlalchemy.dialects.postgresql import insert
+ from sqlalchemy.exc import SQLAlchemyError
+ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+-from sqlalchemy.types import TIMESTAMP
++from sqlalchemy.types import TIMESTAMP, Text
+ 
+ from app.planner.operation import CreationOperation, OperationConflictError
+ from app.planner.query import RecordQuery
+ from app.storage.postgres.tables import events, operations
+ 
++
++def _prefix_query(text: str) -> ColumnElement[Any]:
++    """ROLE 4 (local, proposed by role 3): Russian FTS with every stem as a prefix.
++
++    The Russian stemmer cuts «Иван» to «ива» but keeps «Иваном» as «иван» (also Михаил, Роман, Степан),
++    so «Иван» did not find «Встреча с Иваном». `websearch_to_tsquery` still parses «or», quotes and «-»;
++    each stem then becomes «stem:*» under the `simple` config, which does not stem it a second time.
++    """
++    stems = func.cast(func.websearch_to_tsquery("russian", text), Text)
++    return func.to_tsquery("simple", func.regexp_replace(stems, "'([^']+)'", r"'\1':*", "g"))
++
++
+ # Column name -> value of one events row (sqlalchemy.engine.RowMapping).
+ type RecordRow = Mapping[Any, Any]
+ 
+@@ -166,9 +178,7 @@ class PostgresEventStore[R]:
+         moment, conditions = self._period(query)
+         statement = select(events).where(self._owned(query.owner_id), *conditions)
+         if query.query is not None:
+-            statement = statement.where(
+-                events.c.search.op("@@")(func.websearch_to_tsquery("russian", query.query))
+-            )
++            statement = statement.where(events.c.search.op("@@")(_prefix_query(query.query)))
+         ordering = self._ordering(query, moment)
+         statement = statement.order_by(*ordering, events.c.id).limit(query.limit).offset(query.offset)
+         async with self._storage_errors("Record storage read failed"), self._sessions() as session:
 diff --git a/tests/test_meeting_overlap_pg.py b/tests/test_meeting_overlap_pg.py
 new file mode 100644
 index 0000000..c8b6a09
@@ -160,3 +201,47 @@ index 0000000..c8b6a09
 +        # A search with a period uses the same rule.
 +        found = await call("get_event_by_query", {"query": "отпуск", **_day("2026-11-07")})
 +        assert [e["name"] for e in found["events"]] == ["Отпуск"]
+diff --git a/tests/test_search_prefix_pg.py b/tests/test_search_prefix_pg.py
+new file mode 100644
+index 0000000..f571fa9
+--- /dev/null
++++ b/tests/test_search_prefix_pg.py
+@@ -0,0 +1,38 @@
++"""ROLE 4 (local, proposed by role 3): a name in the nominative finds it in other cases."""
++
++from datetime import UTC, datetime
++from typing import Any
++
++import pytest
++
++from app.agent.mcp import Caller
++from evals.backend import evaluation_backend
++from tests.storage_pg import RUN_PG_INTEGRATION
++
++pytestmark = pytest.mark.skipif(
++    not RUN_PG_INTEGRATION, reason="set RUN_PG_INTEGRATION=1 and POSTGRES_TEST_DB"
++)
++
++NOW = datetime(2026, 10, 19, 9, tzinfo=UTC)
++
++
++async def test_search_finds_names_across_cases_and_keeps_syntax() -> None:
++    async with evaluation_backend(NOW, "Europe/Moscow") as mcp:
++        caller = Caller(mcp.owner, "Europe/Moscow", "req")
++
++        async def names(query: str) -> list[str]:
++            result: dict[str, Any] = await mcp.call(
++                caller, "get_event_by_query", {"query": query}, action_id="read"
++            )
++            return sorted(e["name"] for e in result["events"])
++
++        for number, name in enumerate(["Встреча с Иваном", "Созвон с Михаилом", "Звонок бухгалтеру"]):
++            args = {"event_type": "task", "name": name}
++            assert "created" in await mcp.call(caller, "create_event", args, action_id=f"seed-{number}")
++
++        # «Иван» stems to «ива», «Иваном» to «иван»: without prefixes the name was not found.
++        assert await names("Иван") == ["Встреча с Иваном"]
++        assert await names("Михаил") == ["Созвон с Михаилом"]
++        assert await names("созвон or бухгалтер") == ["Звонок бухгалтеру", "Созвон с Михаилом"]
++        assert await names("встреча -Иван") == []
++        assert await names("ремонт") == []

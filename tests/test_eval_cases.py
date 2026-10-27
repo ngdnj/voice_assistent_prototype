@@ -110,3 +110,15 @@ def test_summarize_counts_behavior_and_cached_tokens() -> None:
     assert (summary["passed"], summary["passed_behavior"]) == (1, 2)
     assert summary["cached_input_tokens"]["mean"] == 1000
     assert summary["total_input_tokens"]["mean"] == 1200
+
+
+def test_search_expectation_accepts_the_word_in_any_query() -> None:
+    """After an empty search the agent retries with synonyms; the first query still has the word."""
+    from evals.cases import found
+
+    first = ToolCall("get_event_by_query", {"query": "ремонт"}, {"events": []})
+    retry = ToolCall("get_event_by_query", {"query": "починка"}, {"events": []})
+    reply = _reply(first, retry)
+    reply.text = "Ничего не нашлось."
+    assert _evaluate(_case(found("ремонт", answer=["не наш|нет|не найд"])), reply) == []
+    assert _evaluate(_case(found("ремонт")), _reply(retry))

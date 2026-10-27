@@ -418,9 +418,11 @@ def period(*checks: Check, answer: list[str] | None = None) -> Expect:
 
 
 def found(*words: str, answer: list[str] | None = None) -> Expect:
+    """Some search query has the words: after an empty search the agent retries with synonyms,
+    so the last query may be another wording of the same request."""
     return Expect(
         "get_event_by_query",
-        [mentions("query", *words)],
+        also=[[mentions("query", *words)]],
         answer_mentions=answer or [],
         forbid=["create_event", "delete_event"],
     )
@@ -545,6 +547,28 @@ TUNE_EXTRA: list[Case] = [
         ["Найди задачу про ремонт"],
         found("ремонт", answer=["не наш|нет|не найд"]),
         seed=SEED,
+    ),
+    # The title has other words than the request: found only after a retry with synonyms (27.10).
+    Case(
+        "search_synonym_call",
+        "search",
+        ["Когда у меня созвон с бухгалтером?"],
+        Expect("get_event_by_query", answer_mentions=["бухгалтер"], forbid=["create_event", "delete_event"]),
+        seed=[*SEED, SeedEvent("meeting", "Звонок бухгалтеру", "", "2026-10-21T11:00:00+03:00")],
+    ),
+    Case(
+        "search_synonym_dentist",
+        "search",
+        ["Найди, когда мне к зубному"],
+        Expect("get_event_by_query", answer_mentions=["стоматолог"], forbid=["create_event", "delete_event"]),
+        seed=SEED_WIDE,
+    ),
+    Case(
+        "search_synonym_utilities",
+        "search",
+        ["Есть напоминание про квартплату?"],
+        Expect("get_event_by_query", answer_mentions=["коммунал"], forbid=["create_event", "delete_event"]),
+        seed=[*SEED, SeedEvent("reminder", "Оплатить коммуналку", "", "2026-10-25T10:00:00+03:00")],
     ),
     Case("general_name", "general", ["Как тебя зовут?"], no_action()),
     Case("general_joke", "general", ["Расскажи анекдот"], no_action()),

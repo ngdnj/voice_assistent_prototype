@@ -198,3 +198,13 @@ def test_midnight_after_a_date_offset_is_invented() -> None:
 )
 def test_search_query_loses_record_type_words(query: str, expected: str) -> None:
     assert normalize_args("get_event_by_query", {"query": query})["query"] == expected
+
+
+def test_empty_search_gets_a_retry_hint_apart_from_the_undated_note() -> None:
+    empty = annotate_result("get_event_by_query", {"query": "созвон бухгалтер"}, {"events": []})
+    assert "синоним" in empty["search_hint"]
+    assert "note" not in empty  # role 1's list output turns `note` into the sentence about tasks
+    hit = {"events": [{"name": "Звонок бухгалтеру"}]}
+    assert annotate_result("get_event_by_query", {"query": "бухгалтер"}, hit) == hit
+    error = {"error": {"code": "validation_error", "message": "x", "field": "query"}}
+    assert annotate_result("get_event_by_query", {"query": ""}, error) == error
