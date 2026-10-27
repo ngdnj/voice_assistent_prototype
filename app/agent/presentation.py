@@ -74,13 +74,6 @@ def _when(event: EventDTO, today: date, zone: ZoneInfo) -> str:
     return value
 
 
-def _done(event: EventDTO, reference_time: datetime) -> str:
-    """Reminders only: ✅ once its time has come (the notification was sent), ❌ while still ahead."""
-    if event.event_type != "reminder" or event.datetime is None:
-        return ""
-    return " ✅" if event.datetime <= reference_time else " ❌"
-
-
 def format_event_list(
     events: list[EventDTO],
     *,
@@ -106,8 +99,7 @@ def format_event_list(
         duration = (
             f" · {_duration(event)}" if sort.startswith("duration_") and event.event_type == "meeting" else ""
         )
-        mark = _done(event, reference_time)
-        line = f"{shown + 1}) {_when(event, today, timezone)} — {title}{kind}{duration}{mark}"
+        line = f"{shown + 1}) {_when(event, today, timezone)} — {title}{kind}{duration}"
         if sum(len(item) + 1 for item in lines) + len(line) > MAX_CHARS - 100:
             break
         lines.append(line)

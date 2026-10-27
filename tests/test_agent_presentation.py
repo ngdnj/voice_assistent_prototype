@@ -199,28 +199,3 @@ async def test_requested_top_two_has_no_unnecessary_shortening_footer():
         "owner", "Две самые длинные встречи", reference_time=NOW, timezone=ZONE.key
     )
     assert len(reply.text.splitlines()) == 3 and "Показано:" not in reply.text
-
-
-def test_reminders_are_marked_done_or_pending_by_their_time():
-    records = [
-        event(1, "Выпить воды", datetime=NOW - timedelta(minutes=5), event_type="reminder"),
-        event(2, "Позвонить", datetime=NOW, event_type="reminder"),
-        event(3, "Оплатить интернет", datetime=NOW + timedelta(hours=2), event_type="reminder"),
-    ]
-    lines = render(records).splitlines()
-    assert lines[0] == "Напоминания:"
-    assert lines[1].endswith("— Выпить воды ✅")
-    assert lines[2].endswith("— Позвонить ✅")
-    assert lines[3].endswith("— Оплатить интернет ❌")
-
-
-def test_only_reminders_get_marks():
-    records = [
-        event(1, "Созвон", datetime=NOW - timedelta(hours=1)),
-        event(2, "Отчёт", event_type="task", status="todo", datetime=None),
-        event(3, "Позвонить", datetime=NOW + timedelta(hours=1), event_type="reminder"),
-    ]
-    text = render(records)
-    assert text.count("✅") + text.count("❌") == 1
-    [line] = [line for line in text.splitlines() if "Позвонить" in line]
-    assert line.endswith("(напоминание) ❌")
