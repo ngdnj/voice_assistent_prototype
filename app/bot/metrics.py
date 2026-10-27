@@ -28,3 +28,12 @@ PROCESSING = Counter(
     "Finished background processing of admitted requests",
     ["outcome"],  # replied | not_heard | audio_error | asr_error | timeout | failed | cancelled
 )
+DELIVERIES = Counter(
+    "assistant_bot_notification_deliveries_total",
+    "Notifications from the stream with a recorded result",
+    ["status", "outcome"],  # status: delivered | retrying | dead_lettered; outcome: the contract's
+)
+REMINDERS_PUBLISHED = Counter(
+    "assistant_bot_reminders_published_total",
+    "Due reminders published to the notification stream by the temporary scheduler",
+)

@@ -25,3 +25,6 @@ CONFIRM_YES_TEXT = "Да, все верно"
 CONFIRM_NO_TEXT = "Нет"
 NOT_ACCEPTED = "Сейчас не получается принять запрос. Попробуйте ещё раз чуть позже."
 START_COMMANDS = frozenset({"/start", "/help"})
+
+# Text of a due reminder; the name and description come from the saved record.
+REMINDER = "🔔 Напоминание: {name}"

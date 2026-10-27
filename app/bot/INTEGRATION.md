@@ -1,7 +1,8 @@
 # Интеграция с ролью 2: MAX bot
 
-> **Статус: v2.2 — ответ заменяет статус обработки** (`app/bot/`, локальный запуск `python -m app.bot`).
-> Потребитель потока уведомлений (раздел 6) ещё не реализован. Изменения — только через журнал версий.
+> **Статус: v2.7 — напоминания приходят в MAX** (`app/bot/`, локальный запуск `python -m app.bot`).
+> Потребитель потока уведомлений реализован (раздел 6); публикацию напоминаний пока делает
+> временный планировщик бота до появления dispatcher роли 1. Изменения — только через журнал версий.
 
 Документ для разработчиков и их агентов: ролей 1 (агент, worker, dispatcher, сборка API), 3 (ASR),
 4 (MCP, REST, initData), 5 (Mini App), 6 (метрики). Внутренние правила роли 2 — в [`AGENTS.md`](AGENTS.md).
@@ -31,11 +32,11 @@ BotService сохраняет ID сообщения «Принял запрос�
 
 | Роль | Что нужно для интеграции | Раздел |
 | --- | --- | --- |
-| 1 | `AgentBackend` подключён; дальше смонтировать `webhook_router` в общий API, согласовать состояния диалога и заменить `BackgroundRunner` на jobs/outbox | 3, 4, 5, 10 |
+| 1 | `AgentBackend` подключён; дальше смонтировать `webhook_router` в общий API, согласовать состояния диалога и заменить `BackgroundRunner` на jobs/outbox. Dispatcher публикует наступившие напоминания через `NotificationStream.publish` — после этого временный `app/bot/reminders.py` удаляется | 3, 4, 5, 6, 10 |
 | 3 | Ничего нового: бот вызывает `SpeechRecognizer.transcribe(audio, suffix)` и обрабатывает его ошибки по `docs/ML.md` §1 | 4 |
-| 4 | Ничего нового: владелец — `str(user_id)` MAX, как в `initData`; `MAX_BOT_TOKEN` общий | 1, 7 |
+| 4 | Ничего нового: владелец — `str(user_id)` MAX, как в `initData`; `MAX_BOT_TOKEN` общий. Временный планировщик только читает `events` (напоминания, `deleted_at IS NULL`); переименование колонок `scheduled_at`, `event_type`, `deleted_at` согласовать с ролью 2 | 1, 6, 7 |
 | 5 | Ничего нового в этой версии | — |
-| 6 | Панели по метрикам раздела 8 | 8 |
+| 6 | Панели по метрикам раздела 8, включая доставку уведомлений (v2.7) | 8 |
 
 ## 1. Сценарий
 
@@ -72,13 +73,15 @@ bot_started или /start ─▶ приветствие
 | --- | --- |
 | `settings.py` | `BotSettings.from_env()`: токен, адрес API, секрет webhook, зона, лимиты, таймауты |
 | `updates.py` | `parse_update(raw) -> BotStarted \| MessageCreated \| Ignored`, `normalize(...) -> IncomingMessage` |
-| `client.py` | `MaxClient`: `send_text`, `download_audio`, `get_updates`; `SendResult`, ошибки аудио |
+| `client.py` | `MaxClient`: `send_text`, `send_to_user`, `edit_text`, `download_audio`, `get_updates`; `SendResult`, ошибки аудио |
 | `gate.py` | `RedisGate`: блокировка пользователя и дедупликация событий |
 | `service.py` | `BotService.handle(event)`, фоновая обработка, порт `Backend`, `BackgroundRunner` |
 | `messages.py` | Тексты для пользователя |
 | `webhook.py` | `handle_webhook(...)`, `webhook_router(bot, secret=...)` для FastAPI |
 | `polling.py`, `__main__.py` | Long polling для локальной разработки без публичного HTTPS |
 | `metrics.py` | Prometheus-метрики бота |
+| `delivery.py` | `DeliveryConsumer`: поток уведомлений → `POST /messages?user_id=` по контракту `docs/notification-stream.md` |
+| `reminders.py` | **Временный** `ReminderScheduler`: наступившие напоминания из PostgreSQL → поток уведомлений |
 
 ## 3. Порт `Backend` (роль 1)
 
@@ -173,6 +176,8 @@ MAX_BOT_TOKEN=<токен тестового бота> uv run --locked --env-fil
   события игнорируются до дедупликации, блокировок и отправки любых статусов.
   Отклонённый домен аудио пишется в лог событием `audio_source_rejected` (только домен, без URL).
   Webhook и long polling одновременно не используются: при активной подписке отключите её перед polling.
+  В обоих режимах вместе с ботом работают доставка уведомлений и временный планировщик напоминаний
+  (раздел 6); им нужны Redis и PostgreSQL с миграциями. `--no-reminders` их отключает.
 - **Локальный webhook-режим** (нужен для нативных голосовых: при long polling MAX присылает их пустыми,
   через webhook — с аудио, по [#250](https://github.com/max-messenger/max-bot-api-client-ts/issues/250)):
 
@@ -192,11 +197,39 @@ uv run --locked --env-file .env python -m app.bot unsubscribe --url https://<т�
   MAX требует порт 443 без порта в URL и доверенный сертификат. Ctrl+C/SIGTERM останавливает приём,
   ждёт активные запросы до 10 с и снимает блокировки. Сервер uvicorn приходит транзитивно (через fastmcp).
 
-## 6. Потребитель уведомлений
+## 6. Напоминания и потребитель уведомлений
 
-Не реализован в v1. План без изменений: `docs/notification-stream.md`, поток `it-gorky:v1:notifications:max`,
-группа `max-delivery-v1`, ACK через `NotificationStream.report`, `BLOCK` 1000 мс, `XAUTOCLAIM` 60 с,
-бюджет 3 получения, таймаут отправки 20 с. Исходы `SendResult.outcome` уже совпадают с исходами контракта.
+```text
+PostgreSQL events (reminder, scheduled_at наступил) ─▶ ReminderScheduler (временно, раз в 5 с)
+   ─▶ NotificationStream.publish ─▶ it-gorky:v1:notifications:max
+   ─▶ DeliveryConsumer (группа max-delivery-v1) ─▶ POST /messages?user_id=<owner_id> ─▶ report + ACK
+```
+
+**Потребитель** (`delivery.py`) реализует `docs/notification-stream.md` без изменения контракта:
+одна группа `max-delivery-v1`, уникальное имя consumer на запуск (`bot-<хост>-<uuid>`), `XREADGROUP >`
+с `BLOCK` 1000 мс, `XAUTOCLAIM` с `min-idle-time` 60 000 мс и сохранённым курсором раз в 30 с.
+Результат и ACK — только `NotificationStream.report`. Бюджет — 3 получения; при `delivery_count >= 4`
+отчёт `not_attempted` / `attempts_exhausted` без отправки. Неверный envelope — `invalid_envelope`.
+Получатель — `owner_id`: для пользователей бота это MAX `user_id`, поэтому отправка идёт по
+`POST /messages?user_id=` без отдельной таблицы соответствия. `owner_id` не из цифр —
+`permanent_failure` / `unknown_recipient`. Отправка ограничена 20 с; превышение — `unknown` /
+`send_timeout` (сообщение могло дойти, повтор возможен). `StaleDeliveryError` — запись перехвачена,
+обработка прекращается без отчёта. Удалённые payload в ответе `XAUTOCLAIM` — событие
+`delivery_stopped` и остановка потребителя (бот продолжает отвечать). Ошибки Redis — пауза 1 с и повтор.
+
+**Временный планировщик** (`reminders.py`, согласован командой до появления dispatcher роли 1)
+раз в 5 с читает из `events` напоминания с `deleted_at IS NULL` и `now − 1 ч < scheduled_at ≤ now`
+страницами по 100 (курсор `(scheduled_at, id)`), только чтение. Публикация однократна: ключ
+`bot:reminder` ставится `SET NX` до `publish` и снимается, если публикация не удалась.
+Перенесённое напоминание срабатывает в новое время, удалённое — не срабатывает. Пропущенные
+больше часа назад (бот был выключен) не отправляются. Текст: «🔔 Напоминание: <название>»
+и описание с новой строки. `notification_id` — UUIDv5 от `id` и времени напоминания.
+При недоступном PostgreSQL — событие `reminders_postgres_unavailable` и повтор через 10 с.
+
+Ограничения: публикация и ключ не атомарны (сбой между ними теряет одно напоминание, а не дублирует);
+доставка at-least-once по контракту (сбой после отправки до ACK может дать дубль).
+Когда dispatcher роли 1 начнёт публиковать напоминания, `reminders.py` и его запуск удаляются,
+потребитель остаётся без изменений.
 
 ## 7. Ключи Redis и настройки
 
@@ -204,6 +237,7 @@ uv run --locked --env-file .env python -m app.bot unsubscribe --url https://<т�
 | --- | --- | --- | --- | --- |
 | `it-gorky:v1:bot:busy:<owner_id hex>` | string: `job_id` | роль 2 | `BOT_BUSY_TTL_S` (180 с) | один активный запрос; снимает только владелец `job_id` (Lua compare-and-delete) |
 | `it-gorky:v1:bot:event:<event_id hex>` | string `"1"` | роль 2 | 9 ч | дедупликация повторной доставки (MAX повторяет до 8 ч) |
+| `it-gorky:v1:bot:reminder:<reminder_id hex>:<unix time>` | string `"1"` (`"invalid"` для пропущенной записи) | роль 2, временно | 25 ч (окно 1 ч + сутки) | напоминание уже опубликовано; пишет и читает только временный планировщик |
 | `it-gorky:v1:notifications:*` | stream | роль 1 / роль 2 | нет | раздел 6 |
 | `assistant:history:<user_id>` | list | роль 3 / роль 1 | 7 дней | история диалога, ботом не используется |
 
@@ -239,12 +273,15 @@ uv run --locked --env-file .env python -m app.bot unsubscribe --url https://<т�
 | `assistant_bot_send_seconds` | histogram | `purpose` |
 | `assistant_bot_audio_fetch_total` | counter | `outcome` (`ok`, `source_error`, `too_large`, `fetch_error`) |
 | `assistant_bot_processing_total` | counter | `outcome` (`replied`, `not_heard`, `audio_error`, `asr_error`, `timeout`, `failed`, `cancelled`) |
+| `assistant_bot_notification_deliveries_total` | counter | `status` (`delivered`, `retrying`, `dead_lettered`), `outcome` (исходы контракта) |
+| `assistant_bot_reminders_published_total` | counter | — |
 
 Пример: доля занятых ответов — `sum(rate(assistant_bot_updates_total{outcome="busy"}[5m])) / sum(rate(assistant_bot_updates_total[5m]))`.
 
 ## 9. Отправка сообщений
 
 - `POST /messages?chat_id=<id>`, тело `{"text": ...}`, до 4000 символов; длинный ответ делится по строкам/словам.
+  Уведомления без входящего сообщения — `POST /messages?user_id=<id>` (`send_to_user`), с теми же повторами.
 - 429, 5xx и сетевые ошибки — до 3 попыток с задержкой 1 и 2 с (лимит MAX — 2 сообщения в секунду на диалог).
   Остальные 4xx не повторяются. Таймаут — исход `unknown` без повтора: запрос мог дойти, повтор дал бы дубль.
 - Неудачная отправка статуса не останавливает обработку; итог отражается в метриках и логах без текста.
@@ -282,3 +319,5 @@ uv run --locked --env-file .env python -m app.bot unsubscribe --url https://<т�
 | v2.4 | 2026-10-26 | Выбран GigaAM: `python -m app.bot` загружает модель в фоне при старте (`asr_warm_up_started` / `_finished` / `_failed`); запуск с `--extra asr` |
 | v2.5 | 2026-10-26 | По реальному событию: голосовые MAX отдаёт с `a.oneme.ru`, домен `oneme.ru` разрешён по умолчанию |
 | v2.6 | 2026-10-26 | `Backend.answer` возвращает `str` или `Reply(text, buttons)`; статус «Принял запрос…» удаляется после ответа с кнопками (обычный ответ по-прежнему заменяет статус, v2.2); сообщение «Распознано» убрано; кнопки-callback «Да, все верно» / «Нет» (`confirm:yes` / `confirm:no`), событие `message_callback` (нужна переподписка), «Нет» → «Повторите запрос.» |
+| v2.7 | 2026-10-27 | Напоминания: `DeliveryConsumer` (поток `max-delivery-v1` → `POST /messages?user_id=`), `MaxClient.send_to_user`, временный `ReminderScheduler` (PostgreSQL только чтение, ключ `bot:reminder`), запуск вместе с ботом и флаг `--no-reminders`, метрики доставки. Контракт `docs/notification-stream.md` не менялся |
+| v2.8 | 2026-10-27 | По согласованию с пользователем правка в зоне роли 1: `format_event_list` (`app/agent/presentation.py`) ставит у напоминаний ✅, если время наступило (уведомление отправлено), и ❌, если ещё нет. Задачи и встречи без изменений. Роли 1 — сверить с планами по статусам |

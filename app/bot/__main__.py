@@ -149,6 +149,34 @@ def start_warm_up(recognizer: SpeechRecognizer | None) -> asyncio.Task[None] | N
     return asyncio.create_task(run())
 
 
+def start_notifications(
+    redis: Redis, client: MaxClient, stop: asyncio.Event, *, prefix: str
+) -> list[asyncio.Task[None]]:
+    """Reminder delivery: the notification stream consumer and the temporary scheduler."""
+    from app.bot.delivery import DeliveryConsumer
+    from app.bot.reminders import run_reminder_scheduler
+    from app.storage.notification_stream import NotificationStream, NotificationStreams
+
+    stream = NotificationStream(redis, keys=NotificationStreams(prefix=prefix))
+    return [
+        asyncio.create_task(DeliveryConsumer(stream, client).run(stop)),
+        asyncio.create_task(run_reminder_scheduler(redis, stream, stop, prefix=prefix)),
+    ]
+
+
+async def stop_background(tasks: list[asyncio.Task[None]], stop: asyncio.Event) -> None:
+    """Let the loops finish their current step, then cancel what is still running."""
+    if not tasks:
+        return
+    stop.set()
+    _, pending = await asyncio.wait(tasks, timeout=SHUTDOWN_TIMEOUT_S)
+    for task in pending:
+        task.cancel()
+    for result in await asyncio.gather(*tasks, return_exceptions=True):
+        if isinstance(result, Exception):
+            log_event("background_task_failed")
+
+
 async def serve(mode: str, args: argparse.Namespace) -> int:
     """Run local MAX -> agent -> MCP with shared Redis and bounded shutdown."""
     settings = BotSettings.from_env()
@@ -173,6 +201,11 @@ async def serve(mode: str, args: argparse.Namespace) -> int:
             )
             stop = asyncio.Event()
             install_stop(stop)
+            background = (
+                start_notifications(redis, client, stop, prefix=settings.key_prefix)
+                if getattr(args, "reminders", False)
+                else []
+            )
             try:
                 if mode == "webhook":
                     app = build_webhook_app(bot, secret=settings.webhook_secret, path=args.path)
@@ -195,6 +228,7 @@ async def serve(mode: str, args: argparse.Namespace) -> int:
                                 task.cancel()
                         await asyncio.gather(polling, stopping, return_exceptions=True)
             finally:
+                await stop_background(background, stop)
                 # Drain before closing the pool used by agent state and lock release.
                 await runner.aclose(SHUTDOWN_TIMEOUT_S)
     except RedisError:
@@ -244,9 +278,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="python -m app.bot", description="Локальный запуск MAX-бота")
     commands = parser.add_subparsers(dest="command")
     polling = commands.add_parser("polling", help="long polling (по умолчанию)")
-    polling.add_argument("--text-only", action="store_true", help="do not initialize local ASR")
     webhook = commands.add_parser("webhook", help="локальный HTTP-сервер для webhook MAX")
-    webhook.add_argument("--text-only", action="store_true", help="do not initialize local ASR")
+    for command in (polling, webhook):
+        command.add_argument("--text-only", action="store_true", help="do not initialize local ASR")
+        command.add_argument(
+            "--no-reminders",
+            dest="reminders",
+            action="store_false",
+            help="не отправлять напоминания (поток уведомлений и временный планировщик)",
+        )
     webhook.add_argument("--host", default="127.0.0.1")
     webhook.add_argument("--port", type=int, default=8080)
     webhook.add_argument("--path", default="/max/webhook")
@@ -261,6 +301,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if args.command is None:
         args.command = "polling"
         args.text_only = False
+        args.reminders = True
     return args
 
 
