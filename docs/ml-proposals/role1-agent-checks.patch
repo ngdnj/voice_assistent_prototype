@@ -1,0 +1,265 @@
+diff --git a/app/agent/agent.py b/app/agent/agent.py
+index 4b993a2..3fc698f 100644
+--- a/app/agent/agent.py
++++ b/app/agent/agent.py
+@@ -20,6 +20,7 @@ from app.agent.mcp import TOOLS, Caller, ToolGateway
+ from app.agent.presentation import format_event_list
+ from app.agent.time_input import has_explicit_time
+ from app.agent.tools import model_tool_schemas
++from app.llm.arg_checks import UNDATED_TASKS_ANSWER, annotate_result, check_args, normalize_args
+ from app.llm.model import llm_session
+ from app.llm.prompts import render_system_prompt, user_timezone
+ from app.llm.speech import to_chat_text
+@@ -72,6 +73,9 @@ class AgentReply:
+     cost_rub: float = 0.0
+     latency_s: float = 0.0
+     retried: bool = False
++    # ROLE 1 (local, proposed by role 3): the prompt prefix served from GigaChat's cache. It is not in
++    # input_tokens and not billed, but economics needs the full input (AGENTS §15).
++    cached_input_tokens: int = 0
+ 
+ 
+ class TemporaryToolError(RuntimeError):
+@@ -172,6 +176,8 @@ class Assistant:
+                     if answer.usage_metadata:
+                         state.input_tokens += answer.usage_metadata["input_tokens"]
+                         state.output_tokens += answer.usage_metadata["output_tokens"]
++                        details = answer.usage_metadata.get("input_token_details") or {}
++                        state.cached_input_tokens += details.get("cache_read", 0)
+                     if answer.invalid_tool_calls:
+                         raise ValueError("Model returned malformed tool arguments")
+                     if answer.tool_calls:
+@@ -249,6 +255,7 @@ class Assistant:
+                 cost,
+                 time.monotonic() - started,
+                 state.retried,
++                cached_input_tokens=state.cached_input_tokens,
+             )
+ 
+     async def _pending(
+@@ -273,7 +280,14 @@ class Assistant:
+                     raise ValueError("Model tool call must have an ID")
+                 if call_id in completed:
+                     continue
+-                arguments, name = call["args"], call["name"]
++                name = call["name"]
++                # ROLE 1 (local, proposed by role 3): repair GigaChat argument glitches and check the
++                # arguments against the utterance before any call (app/llm/arg_checks.py, docs/ML.md §1).
++                # The server cannot know what the user said: an invented midnight or meeting end, a past
++                # «сегодня» or «31 ноября» are stopped here and the model is told what to ask.
++                arguments = normalize_args(name, call["args"])
++                call["args"] = arguments  # the trace and the history show what was actually sent
++                arg_error = check_args(name, arguments, state.messages[0].text, reference_time)
+                 needs_time = (
+                     name == "create_event"
+                     and arguments.get("event_type") in ("reminder", "meeting")
+@@ -321,10 +335,13 @@ class Assistant:
+                             "field": None,
+                         }
+                     }
++                elif arg_error is not None:
++                    result = {"error": {"code": "validation_error", "message": arg_error, "field": None}}
+                 elif previous is not None:
+                     result = previous
+                 else:
+                     result = await self.mcp.call(caller, name, arguments, action_id=action)
++                    result = annotate_result(name, arguments, result)
+                     if result.get("error", {}).get("code") == "temporary_unavailable":
+                         raise TemporaryToolError("Tool storage is temporarily unavailable; retry this turn")
+                 state.messages.append(
+@@ -392,13 +409,18 @@ class Assistant:
+         # its own display/length budget cannot fit those N records.
+         if calls[-1].args.get("limit") is not None:
+             truncated = False
+-        return format_event_list(
++        listing = format_event_list(
+             list(records.values()),
+             reference_time=reference_time,
+             timezone=zone,
+             sort=cast(RecordSort, sort),
+             truncated=truncated,
+         )
++        # ROLE 1 (local, proposed by role 3): the list is built here, so role 3's note on tasks without a
++        # deadline (app/llm/arg_checks.annotate_result) reaches the user only this way.
++        if any(call.ok and call.result is not None and "note" in call.result for call in calls):
++            listing = f"{listing}\n\n{UNDATED_TASKS_ANSWER}"
++        return listing
+ 
+     @staticmethod
+     def _saved(state: TurnState, *, name: str | None = None) -> bool:
+diff --git a/app/agent/history.py b/app/agent/history.py
+index b48a1b1..77e172a 100644
+--- a/app/agent/history.py
++++ b/app/agent/history.py
+@@ -25,6 +25,8 @@ class TurnState:
+     retried: bool = False
+     complete: bool = False
+     has_explicit_time: bool = False
++    # ROLE 1 (local, proposed by role 3): prompt tokens served from the provider's cache.
++    cached_input_tokens: int = 0
+ 
+     def encode(self) -> str:
+         return json.dumps(
+@@ -36,6 +38,7 @@ class TurnState:
+                 "retried": self.retried,
+                 "complete": self.complete,
+                 "has_explicit_time": self.has_explicit_time,
++                "cached_input_tokens": self.cached_input_tokens,
+             },
+             ensure_ascii=False,
+         )
+@@ -51,6 +54,7 @@ class TurnState:
+             retried=value["retried"],
+             complete=value["complete"],
+             has_explicit_time=value.get("has_explicit_time", False),
++            cached_input_tokens=value.get("cached_input_tokens", 0),
+         )
+ 
+ 
+diff --git a/app/agent/time_input.py b/app/agent/time_input.py
+index 00f4b37..4ae1e82 100644
+--- a/app/agent/time_input.py
++++ b/app/agent/time_input.py
+@@ -36,16 +36,28 @@ WITH_DAY_PART = re.compile(
+     rf"\b(?:[01]?\d|2[0-3]|{HOUR_WORD})\s*(?:часа?\s+|часов\s+)?(?:утра|дня|вечера|ночи)\b",
+     re.I,
+ )
++# ROLE 1 (local, proposed by role 3; policy agreed with the user 26.10): «через неделю», «через 3 дня»,
++# «через месяц» name a date, not a time, so a reminder or meeting needs a question about the hour.
++# Minutes, hours and «сутки» are exact moments from the reference time.
+ RELATIVE = re.compile(
+     r"\b(?:через|спустя)\s+(?:(?:\d+|один|одну|два|две|три|четыре|пять|десять|пятнадцать|"
+-    r"двадцать|тридцать|полтора|полторы)\s+)?(?:минут\w*|час\w*|полчаса|день|дня|дней|сут\w*|недел\w*)\b",
++    r"двадцать|тридцать|полтора|полторы)\s+)?(?:минут\w*|час\w*|полчаса|сут\w*)\b",
+     re.I,
+ )
+ SHORT_HOUR = re.compile(r"(?:[01]?\d|2[0-3])(?:\s*(?:утра|дня|вечера|ночи))?[.!]?", re.I)
+ CONFIRM = re.compile(r"(?:да|верно|хорошо|подтверждаю|так и сделай)[.!]?", re.I)
+ 
+ 
++# ROLE 1 (local, proposed by role 3): «через 3 дня» is three days, not «3 часа дня» (15:00) for WITH_DAY_PART.
++# The date offset is removed before looking for an hour; the hour, if named, stays («через неделю в 10»).
++DATE_OFFSET = re.compile(
++    r"\b(?:через|спустя)\s+(?:\S+\s+)?(?:день|дня|дней|недел\w*|месяц\w*|полгода|год\w*|лет)\b",
++    re.I,
++)
++
++
+ def has_explicit_time(text: str, history: Sequence[BaseMessage] = ()) -> bool:
++    text = DATE_OFFSET.sub(" ", text)
+     if (
+         CLOCK.search(text)
+         or HOUR.search(text)
+diff --git a/tests/test_agent_arg_checks.py b/tests/test_agent_arg_checks.py
+new file mode 100644
+index 0000000..3803caa
+--- /dev/null
++++ b/tests/test_agent_arg_checks.py
+@@ -0,0 +1,76 @@
++"""Role 3's argument checks inside role 1's agent loop (ROLE 1, local: app/agent/agent.py)."""
++
++from datetime import UTC, datetime
++
++from langchain_core.messages import AIMessage, ToolMessage
++from langchain_core.messages.ai import UsageMetadata
++
++from app.agent.agent import Assistant
++from app.agent.history import InMemoryChatHistory
++from app.llm.arg_checks import UNDATED_TASKS_ANSWER
++from tests.agent_support import ScriptedModel, tool
++from tests.test_agent import Gateway
++
++# 22:23 in Moscow.
++EVENING = datetime(2026, 10, 19, 19, 23, 55, tzinfo=UTC)
++TIME = {"reference_time": EVENING, "timezone": "Europe/Moscow"}
++
++
++async def test_past_time_today_is_not_saved_and_model_is_told_why() -> None:
++    past = {"event_type": "meeting", "name": "Совещание", "datetime": "2026-10-19T10:00:00+03:00"}
++    model = ScriptedModel(
++        responses=[tool(arguments=past), AIMessage("10:00 уже прошло, поставить на завтра?")]
++    )
++    gateway = Gateway()
++    reply = await Assistant(model, gateway, InMemoryChatHistory()).handle(
++        "owner", "Сегодня в 10 утра совещание", operation_id="turn-1", **TIME
++    )
++    assert gateway.calls == []  # nothing reached the server
++    [call] = reply.tool_calls
++    assert call.result is not None and "уже прошло" in call.result["error"]["message"]
++    told = [m for m in model.seen[-1] if isinstance(m, ToolMessage)]
++    assert "поставить на завтра" in told[-1].text
++
++
++async def test_reminder_end_from_next_record_is_dropped_before_the_call() -> None:
++    leaked = {
++        "event_type": "reminder",
++        "name": "Позвонить маме",
++        "datetime": "2026-10-20T09:00:00+03:00",
++        "end_time": "2026-10-20T18:00:00+03:00",
++    }
++    model = ScriptedModel(responses=[tool(arguments=leaked), AIMessage("Напомню завтра в 9:00.")])
++    gateway = Gateway()
++    reply = await Assistant(model, gateway, InMemoryChatHistory()).handle(
++        "owner", "Напомни завтра в 9 позвонить маме и в 18 забрать посылку", operation_id="turn-1", **TIME
++    )
++    [(_, _, sent, _)] = gateway.calls
++    assert "end_time" not in sent
++    assert "end_time" not in reply.tool_calls[0].args  # the trace shows what was sent
++
++
++async def test_cached_prompt_tokens_are_counted_separately() -> None:
++    usage = UsageMetadata(
++        input_tokens=200, output_tokens=30, total_tokens=230, input_token_details={"cache_read": 2500}
++    )
++    model = ScriptedModel(responses=[AIMessage("Здравствуйте!", usage_metadata=usage)])
++    reply = await Assistant(model, Gateway(), InMemoryChatHistory()).handle(
++        "owner", "Привет", operation_id="turn-1", **TIME
++    )
++    assert (reply.input_tokens, reply.cached_input_tokens, reply.output_tokens) == (200, 2500, 30)
++
++
++class TasksGateway(Gateway):
++    async def call(self, caller, name, arguments, *, action_id):
++        self.calls.append((caller, name, arguments, action_id))
++        return {"events": [], "truncated": False}
++
++
++async def test_list_of_tasks_built_by_code_says_undated_tasks_are_not_shown() -> None:
++    week = {"start_time": "2026-10-19T00:00:00+03:00", "end_time": "2026-10-26T00:00:00+03:00"}
++    period = tool("get_events_by_period", {**week, "event_types": ["task"]})
++    model = ScriptedModel(responses=[period, AIMessage("Задач на неделю нет.")])
++    reply = await Assistant(model, TasksGateway(), InMemoryChatHistory()).handle(
++        "owner", "Покажи мои задачи", operation_id="turn-1", **TIME
++    )
++    assert UNDATED_TASKS_ANSWER in reply.text
+diff --git a/tests/test_agent_time_input.py b/tests/test_agent_time_input.py
+index 15998b2..0fdd3a6 100644
+--- a/tests/test_agent_time_input.py
++++ b/tests/test_agent_time_input.py
+@@ -66,3 +66,26 @@ def test_time_can_be_inherited_only_from_a_clarification():
+ @pytest.mark.parametrize("text", ["Завтра 25 утра встреча", "Завтра 10 задач", "Встреча 27 октября утром"])
+ def test_numbers_without_a_valid_hour_and_day_part_are_not_time(text):
+     assert not has_explicit_time(text)
++
++
++@pytest.mark.parametrize(
++    "text",
++    [
++        "Напомни через неделю позвонить маме",
++        "через 3 дня",
++        "через месяц продлить подписку",
++        "через полгода",
++        "через год",
++        "через две недели встреча с юристом",
++    ],
++)
++def test_days_weeks_months_name_a_date_not_a_time(text):
++    """ROLE 1 (local, policy agreed with the user 26.10): the hour is asked, not invented."""
++    assert not has_explicit_time(text)
++
++
++@pytest.mark.parametrize(
++    "text", ["Напомни через неделю в 10 позвонить маме", "через 3 дня в 15:00", "через месяц в пять вечера"]
++)
++def test_hour_after_a_date_offset_is_still_explicit(text):
++    assert has_explicit_time(text)

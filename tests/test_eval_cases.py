@@ -11,10 +11,11 @@ MVP_CLASSES = ("create", "period", "clarify", "search", "general")
 
 
 def test_each_class_has_20_to_31_cases_and_both_splits() -> None:
-    per_class = Counter(c.category for c in CASES)
+    measured = [c for c in CASES if c.split != "debug"]  # debug cases are not the §15 dataset
+    per_class = Counter(c.category for c in measured)
     for category in MVP_CLASSES:
         assert 20 <= per_class[category] <= 31, (category, per_class[category])
-        splits = {c.split for c in CASES if c.category == category}
+        splits = {c.split for c in measured if c.category == category}
         assert splits == {"tune", "holdout"}, category
 
 
@@ -80,3 +81,44 @@ def test_summarize_reports_mean_median_p95_and_skips_infra_errors() -> None:
     assert summary["latency_s"]["median"] == 2.0
     assert summary["by_category"] == {"create": {"passed": 2, "n": 3}}
     assert describe([]) == {"mean": 0.0, "median": 0.0, "p95": 0.0}
+
+
+def test_behavior_score_excuses_only_rejected_changes() -> None:
+    """«31 ноября»: create_event was tried, the check rejected it, the model asked — no record changed."""
+    case = _case(Expect(None, answer_mentions=["нет такого"]))
+    rejected = ToolCall("create_event", {"datetime": "2026-11-31T10:00:00+03:00"}, {"error": {"code": "x"}})
+    reply = _reply(rejected)
+    reply.text = "31 ноября нет такого дня, какую дату поставить?"
+    assert _evaluate(case, reply)  # strict: create_event must not be called at all
+    assert _evaluate(case, reply, by_behavior=True) == []
+
+    saved = ToolCall("create_event", {"datetime": "2026-11-30T10:00:00+03:00"}, {"created": {"id": "1"}})
+    reply = _reply(saved)
+    reply.text = "31 ноября нет такого дня, поставил на 30-е."
+    assert _evaluate(case, reply, by_behavior=True)  # a record did change
+
+
+def test_summarize_counts_behavior_and_cached_tokens() -> None:
+    rows = [
+        {"category": "clarify", "passed": False, "passed_behavior": True, "cached_input_tokens": 2000},
+        # A report from before the behaviour score: falls back to the strict result, no cache.
+        {"category": "clarify", "passed": True},
+    ]
+    for row in rows:
+        row.update(infra_error=False, latency_s=1.0, cost_rub=0.0, input_tokens=200, output_tokens=50)
+    summary = summarize(rows)
+    assert (summary["passed"], summary["passed_behavior"]) == (1, 2)
+    assert summary["cached_input_tokens"]["mean"] == 1000
+    assert summary["total_input_tokens"]["mean"] == 1200
+
+
+def test_search_expectation_accepts_the_word_in_any_query() -> None:
+    """After an empty search the agent retries with synonyms; the first query still has the word."""
+    from evals.cases import found
+
+    first = ToolCall("get_event_by_query", {"query": "ремонт"}, {"events": []})
+    retry = ToolCall("get_event_by_query", {"query": "починка"}, {"events": []})
+    reply = _reply(first, retry)
+    reply.text = "Ничего не нашлось."
+    assert _evaluate(_case(found("ремонт", answer=["не наш|нет|не найд"])), reply) == []
+    assert _evaluate(_case(found("ремонт")), _reply(retry))

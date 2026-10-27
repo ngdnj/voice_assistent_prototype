@@ -18,7 +18,8 @@ STAGE_LATENCY = Histogram(
     ["stage"],  # asr | agent
     buckets=LATENCY_BUCKETS,
 )
-LLM_TOKENS = Counter("assistant_llm_tokens_total", "LLM tokens used", ["kind"])  # input | output
+# kind: input (billed) | cached_input (served from the prompt cache, not billed by GigaChat) | output
+LLM_TOKENS = Counter("assistant_llm_tokens_total", "LLM tokens used", ["kind"])
 REQUEST_COST = Histogram(
     "assistant_request_cost_rub", "LLM cost of one user request, RUB", buckets=COST_BUCKETS_RUB
 )
@@ -28,6 +29,8 @@ AGENT_RETRIES = Counter("assistant_agent_retries_total", "Agent requests retried
 # Audio seconds are the billing unit of cloud ASR and the load measure of local ASR.
 ASR_AUDIO_SECONDS = Counter("assistant_asr_audio_seconds_total", "Seconds of recognized audio", ["backend"])
 ASR_ERRORS = Counter("assistant_asr_errors_total", "Failed ASR provider calls", ["backend"])
+# Messages sent to the backup ASR: busy (local queue full) | primary_error.
+ASR_OVERFLOW = Counter("assistant_asr_overflow_total", "Messages sent to the backup ASR", ["reason"])
 
 
 def quantiles(values: Sequence[float]) -> dict[str, float]:

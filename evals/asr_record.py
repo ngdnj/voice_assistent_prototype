@@ -15,6 +15,7 @@ import csv
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from evals.asr_run import PHRASES_FILE
@@ -34,11 +35,31 @@ def list_devices() -> list[str]:
     return _DSHOW_AUDIO_RE.findall(result.stderr)
 
 
+# DirectShow buffers 500 ms by default: the first buffer came out silent and the first words were lost
+# (speech began at exactly 0.50 s in all 50 recordings of 26.10). A small buffer and a pause before
+# «говорите» keep the start of the phrase; the leading silence does not hurt recognition.
+DSHOW_BUFFER_MS = "50"
+LEAD_IN_S = 1.0
+
+
 def record(path: Path, input_format: str, device: str) -> None:
     source = f"audio={device}" if input_format == "dshow" else device
-    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", input_format, "-i", source]
+    buffer = ["-audio_buffer_size", DSHOW_BUFFER_MS] if input_format == "dshow" else []
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        input_format,
+        *buffer,
+        "-i",
+        source,
+    ]
     process = subprocess.Popen([*command, "-ac", "1", "-ar", "16000", str(path)], stdin=subprocess.PIPE)
-    input("  … запись, Enter — стоп")
+    time.sleep(LEAD_IN_S)  # the device needs a moment to start delivering audio
+    input("  ● говорите, Enter — стоп")
     process.communicate(b"q", timeout=10)  # "q" makes ffmpeg finish the file properly
 
 

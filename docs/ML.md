@@ -77,7 +77,6 @@ class ToolCall:
 
 ```python
 from fastmcp import Client
-from redis.asyncio import Redis
 
 from app.agent.agent import Assistant, Pricing
 from app.agent.history import RedisChatHistory
@@ -86,15 +85,18 @@ from app.asr.base import AsrError, AudioTooLongError
 from app.asr.factory import build_recognizer
 from app.config import get_settings
 from app.llm.model import build_chat_model
+from app.storage.redis import RedisSettings, redis_connection
 
 settings = get_settings()
 recognizer = build_recognizer(settings)  # один на процесс worker
-redis = Redis.from_url(settings.redis_url, decode_responses=True)
-history = RedisChatHistory(
-    redis, settings.history_max_turns, settings.history_ttl_s, settings.history_max_tokens
-)
 
-async with Client(settings.mcp_url) as mcp:  # MCP-сервер роли 4
+async with (
+    redis_connection(RedisSettings.from_env()) as redis,  # общие REDIS_* роли 1
+    Client(settings.mcp_url) as mcp,  # MCP-сервер роли 4
+):
+    history = RedisChatHistory(
+        redis, settings.history_max_turns, settings.history_ttl_s, settings.history_max_tokens
+    )
     assistant = Assistant(build_chat_model(settings), mcp, history, Pricing(*settings.pricing))
     # для каждого job:
     text = job.text
@@ -138,6 +140,44 @@ await recognizer.aclose()  # при остановке worker
 1. Ключ привязан к пользователю. Если в MAX у пользователя будет больше одного диалога с ботом (группы), нужен `assistant:history:<user_id>:<chat_id>`. Тогда `handle()` получит `chat_id`.
 2. Префикс `assistant:` — роль 1 может задать общий для всех ключей проекта.
 3. Сброс по команде пользователя — `assistant.reset(user_id)`.
+
+### Проверка аргументов модели перед вызовом инструмента (для роли 1)
+
+> **ROLE 1, проверено только локально, не в репозитории.** Логика — в нашей части,
+> `app/llm/arg_checks.py`. Её нужно вызывать в агентском цикле, а это код роли 1.
+
+**Проблема.** GigaChat-2-Max ставит напоминанию или встрече без названного времени 00:00 и создаёт запись: «Напомни завтра позвонить маме» → напоминание на полночь. Так было во всех прогонах eval, правило в промпте не помогло. MCP-сервер это не поймает: 00:00 — допустимое время.
+
+**Что сделать в агентском цикле.** Перед отправкой `create_event` в MCP вызвать
+`invented_midnight(tool_name, args, user_text)`, где `user_text` — текущая реплика пользователя (при голосе — расшифровка).
+Если функция вернула текст, **не вызывать MCP**, а вернуть модели `{"error": <текст>}` как результат инструмента. Модель спросит время.
+Относительное время («через 2 часа» в 22:00) и явная полночь («в полночь», «00:00», «12 ночи») пропускаются.
+
+**Как подключено в локальном прототипе:**
+- `app/agent/tools.py` — в `call()`, до `client.call_tool`;
+- `app/agent/agent.py` — передача `text` в `load_user_tools`.
+
+Оба места помечены комментарием `ROLE 1`.
+
+Та же проверка отклоняет конец встречи (`end_time`), если пользователь не называл ни конец, ни длительность. Это `invented_end`; обе проверки вызываются через `check_args()`.
+
+### Предложение для роли 4: конец встречи (`end_time`)
+
+> **ROLE 4, сделано только локально в тестовой подмене (`tests/fakes`), в контракте AGENTS §8 этого нет.**
+
+**Зачем.** Пользователи говорят «встреча с 15 до 17» или «созвон на полчаса». Сейчас конец теряется.
+
+**Предлагаемое изменение `create_event`:**
+- необязательный аргумент `end_time` (ISO 8601 со смещением);
+- только для `meeting`;
+- требует `datetime` и должен быть строго позже него;
+- в БД — колонка `TIMESTAMPTZ NULL` с `CHECK (end IS NULL OR end > start)`.
+
+**Если длительность не названа** — `end_time` не передаётся, запись как раньше (AGENTS §7: «не выдумывай длительность»). Промпт и `invented_end` этого придерживаются.
+
+**`get_events_by_period`:** встреча с концом попадает в период, если пересекается с ним (`start < period_end AND end > period_start`). Встреча 23:00–01:00 видна и в «сегодня», и в «завтра». Без конца — как раньше, по моменту начала.
+
+**Результат:** в ответе `created` появляется поле `end_time` (или `null`).
 
 ## 2. ASR: выбор между GigaAM и Yandex SpeechKit (T5)
 
@@ -197,7 +237,7 @@ await recognizer.aclose()  # при остановке worker
 ```bash
 uv sync --extra asr              # без --extra asr ставится только текстовая часть, без torch
 cp .env.example .env             # вписать GIGACHAT_CREDENTIALS
-docker compose up -d redis       # или оставить REDIS_URL пустым — история в памяти
+docker compose up -d redis postgres   # история диалога — в Redis, записи — в PostgreSQL
 ```
 
 Dev-демо (не продукт; пользователь определяется cookie, `user_id` в продукте берётся из MAX):

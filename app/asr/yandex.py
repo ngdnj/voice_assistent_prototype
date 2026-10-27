@@ -7,6 +7,7 @@ Billing is per started 15 s of audio, so a 3 s command costs one unit.
 """
 
 import asyncio
+import re
 import time
 
 import httpx
@@ -17,6 +18,17 @@ from app.asr.base import MAX_DURATION_S, AsrError, AudioTooLongError, Transcript
 
 RECOGNIZE_URL = "https://stt.api.cloud.yandex.net/speech/v1/stt:recognize"
 BACKEND = "yandex"
+
+# API v1 writes times as separate numbers: «в 14 0 0» for 14:00, «в 11 15» for 11:15 (26.10, 11 of 50
+# phrases). The agent then has to guess the time, so they are joined back. Minutes are joined only
+# after a preposition of time, so «3 литра», «12 яиц» or «25 октября» stay as they are.
+_FULL_HOUR_RE = re.compile(r"\b([01]?\d|2[0-3]) 0 0\b")
+_HOUR_MINUTES_RE = re.compile(r"\b(в|к|на|до|с|со|по|от|после|около) ([01]?\d|2[0-3]) ([0-5]\d)\b")
+
+
+def normalize_times(text: str) -> str:
+    text = _FULL_HOUR_RE.sub(r"\1:00", text)
+    return _HOUR_MINUTES_RE.sub(r"\1 \2:\3", text)
 
 
 class YandexSpeechKitRecognizer:
@@ -55,7 +67,7 @@ class YandexSpeechKitRecognizer:
                     raise AsrError(f"SpeechKit недоступен: {type(exc).__name__}") from exc
             else:
                 if response.status_code == 200:
-                    return str(response.json().get("result", "")).strip()
+                    return normalize_times(str(response.json().get("result", "")).strip())
                 retryable = response.status_code == 429 or response.status_code >= 500
                 if last or not retryable:
                     # The body may echo request details; only the status goes into the error.

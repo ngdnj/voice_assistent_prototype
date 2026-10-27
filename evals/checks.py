@@ -148,6 +148,15 @@ def on_day(*expected: str) -> Check:
     return check
 
 
+def absent(key: str) -> Check:
+    """The argument is not passed: nothing the user did not say is invented."""
+
+    def check(args: dict[str, Any]) -> str | None:
+        return f"{key}={args[key]!r} передан, хотя пользователь его не называл" if args.get(key) else None
+
+    return check
+
+
 def no_time() -> Check:
     """A task without a deadline: neither `date` nor `datetime`."""
 
