@@ -32,4 +32,19 @@ export async function updateTaskStatus(id: string, status: TaskStatus): Promise<
     const body = await response.json();
     throw new Error(body.error?.message ?? "Не удалось изменить статус");
   }
+  
+}
+
+export async function searchEvents(query: string, eventType: string): Promise<EventRecord[]> {
+  const headers = await authHeaders();
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const params = new URLSearchParams({ query, timezone });
+  params.append("event_types", eventType);
+
+  const response = await fetch(`${API_BASE}/events/search?${params}`, { headers });
+  const body = await response.json();
+  if (!response.ok) {
+    throw new Error(body.error?.message ?? "Не удалось найти записи");
+  }
+  return body.events as EventRecord[];
 }

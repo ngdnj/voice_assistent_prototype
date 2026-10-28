@@ -4,7 +4,7 @@
 const TEST_BOT_TOKEN = "local-dev-fake-bot-token-for-testing";
 const TEST_OWNER_ID = 123456789;
 
-async function hmacSha256(key: ArrayBuffer | Uint8Array, message: string): Promise<ArrayBuffer> {
+async function hmacSha256(key: BufferSource, message: string): Promise<ArrayBuffer> {
   const cryptoKey = await crypto.subtle.importKey(
     "raw",
     key,

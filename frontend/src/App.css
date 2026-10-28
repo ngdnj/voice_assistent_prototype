@@ -203,3 +203,19 @@ h1 {
 .status-error {
   color: #ff6b6b;
 }
+
+.search-input {
+  display: block;
+  width: 100%;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  border-radius: 10px;
+  border: 1px solid #2d2d35;
+  background: #1c1c22;
+  color: #f1f1f1;
+  font-size: 14px;
+}
+
+.search-input::placeholder {
+  color: #666;
+}
