@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import "./App.css";
 import { Tabs } from "./Tabs";
 import { EventList } from "./EventList";
-import { mockEvents } from "./mockData";
+import { fetchEvents, updateTaskStatus } from "./api";
 import type { EventRecord, EventType, TaskStatus } from "./types";
 
 type Status = "loading" | "error" | "ready";
@@ -18,35 +18,43 @@ function App() {
     return d.toISOString().slice(0, 10);
   });
 
-  // Пока нет настоящего API — имитируем загрузку по периоду на тестовых данных.
   useEffect(() => {
+    let cancelled = false;
     setStatus("loading");
-    const timer = setTimeout(() => {
-      try {
-        const start = new Date(from);
-        const end = new Date(to);
-        end.setDate(end.getDate() + 1); // конец периода включительно
-        const filtered = mockEvents.filter((event) => {
-          const moment = event.datetime ?? event.date;
-          if (!moment) return true; // без срока — показываем всегда
-          const momentDate = new Date(moment);
-          return momentDate >= start && momentDate < end;
-        });
-        setEvents(filtered);
-        setStatus("ready");
-      } catch {
-        setStatus("error");
-      }
-    }, 400);
-    return () => clearTimeout(timer);
+
+    const start = new Date(from).toISOString();
+    const endDate = new Date(to);
+    endDate.setDate(endDate.getDate() + 1); // конец периода включительно
+    const end = endDate.toISOString();
+
+    fetchEvents(start, end)
+      .then((data) => {
+        if (!cancelled) {
+          setEvents(data);
+          setStatus("ready");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setStatus("error");
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [from, to]);
 
   const visibleEvents = events.filter((event) => event.event_type === activeTab);
 
-  function handleStatusChange(id: string, status: TaskStatus) {
+  async function handleStatusChange(id: string, newStatus: TaskStatus) {
+    const previous = events;
     setEvents((prev) =>
-      prev.map((event) => (event.id === id ? { ...event, status } : event))
+      prev.map((event) => (event.id === id ? { ...event, status: newStatus } : event))
     );
+    try {
+      await updateTaskStatus(id, newStatus);
+    } catch {
+      setEvents(previous); // откатываем, если backend отклонил изменение
+    }
   }
 
   return (
