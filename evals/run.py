@@ -139,6 +139,7 @@ def _evaluate(case: Case, reply: AgentReply, *, by_behavior: bool = False) -> li
     for words in expect.answer_mentions:  # "a|b" means any of the alternatives
         if not any(w.lower() in answer for w in words.split("|")):
             errors.append(f"в ответе нет «{words}»")
+    errors += [f"в ответе есть «{word}»" for word in expect.answer_absent if word.lower() in answer]
     # AgentReply is displayed in chat. TTS still has its separate to_speech_text boundary.
     errors += speech_issues(reply.text, allow_lists=True)
     return errors

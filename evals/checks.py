@@ -227,3 +227,5 @@ class Expect:
     forbid: list[str] = field(default_factory=list)
     # Several records in one phrase: each group of checks must match some call of `tool`.
     also: list[list[Check]] = field(default_factory=list)
+    # None of these may occur in the answer (case-insensitive): e.g. the system prompt's own text.
+    answer_absent: list[str] = field(default_factory=list)
