@@ -10,7 +10,7 @@ UPDATES = Counter(
 SENDS = Counter(
     "assistant_bot_send_total",
     "Messages sent to MAX",
-    # purpose: welcome | status | transcript | reply | busy | error | edit | repeat | app
+    # purpose: welcome | status | transcript | reply | busy | error | edit | repeat | app | confirm
     ["purpose", "outcome"],
 )
 SEND_SECONDS = Histogram(
@@ -27,7 +27,8 @@ AUDIO_FETCH = Counter(
 PROCESSING = Counter(
     "assistant_bot_processing_total",
     "Finished background processing of admitted requests",
-    ["outcome"],  # replied | not_heard | audio_error | asr_error | timeout | failed | cancelled
+    # replied | awaiting_confirmation | not_heard | audio_error | asr_error | timeout | failed | cancelled
+    ["outcome"],
 )
 DELIVERIES = Counter(
     "assistant_bot_notification_deliveries_total",

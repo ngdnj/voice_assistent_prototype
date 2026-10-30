@@ -1,6 +1,6 @@
 # Интеграция с ролью 2: MAX bot
 
-> **Статус: v2.9 — кнопка Mini App, напоминания приходят в MAX** (`app/bot/`, локальный запуск `python -m app.bot`).
+> **Статус: v2.10 — подтверждение голосового запроса, кнопка Mini App, напоминания в MAX** (`app/bot/`, локальный запуск `python -m app.bot`).
 > Потребитель потока уведомлений реализован (раздел 6); публикацию напоминаний пока делает
 > временный планировщик бота до появления dispatcher роли 1. Изменения — только через журнал версий.
 
@@ -45,8 +45,10 @@ bot_started или /start ─▶ приветствие
 сообщение ─▶ дедупликация события ─▶ занято? ─да─▶ «Сейчас обрабатывается ваш предыдущий запрос…»
                                          └нет─▶ блокировка ─▶ «Принял запрос, обрабатываю…» ─▶ фоновая обработка
 фоновая обработка: текст ─────────────────────────────────▶ Backend.answer ─▶ ответ пользователю
-                   голос ─▶ загрузка ─▶ ASR ─────────────────▶ Backend.answer ─▶ ответ пользователю
+                   голос ─▶ загрузка ─▶ ASR ─▶ «Распознано: … Все верно?» [Да, верно] [Нет]
                    в любом исходе ─▶ снятие блокировки
+«Да, верно» ─▶ удалить сообщение с кнопками ─▶ блокировка ─▶ «Принял запрос…» ─▶ Backend.answer ─▶ ответ
+«Нет» ─────▶ «Повторите запрос.»
 ```
 
 - Один активный запрос на пользователя. Пока он обрабатывается, **любой** ввод — текст, голос, `/start`,
@@ -64,7 +66,14 @@ bot_started или /start ─▶ приветствие
   готовы в `CONFIRM_BUTTONS`. Демо-backend удалён (v2), `AgentBackend` сейчас возвращает текст без кнопок.
 - Обычный ответ или ошибка заменяют сообщение «Принял запрос, обрабатываю…» (`edit_text`, см. v2.2).
   Ответ с кнопками приходит новым сообщением, а статус удаляется (`DELETE /messages`).
-  Отдельного сообщения «Распознано: …» больше нет.
+  Голос (v2.10): распознанный текст сначала показывается как «Распознано: <текст>
+Все верно?» с кнопками
+  «Да, верно» (`voice:yes:<id>`) и «Нет» (`voice:no:<id>`); статус «Принял запрос…» удаляется.
+  Текст хранится в `bot:voice` (раздел 7) до ответа, не дольше 15 минут. «Да, верно» удаляет сообщение
+  с кнопками и отправляет текст в `Backend.answer` с `reference_time` момента прихода голосового;
+  «Нет» отбрасывает текст и отвечает «Повторите запрос.». Кнопки старого голосового после нового,
+  после «Нет» или по истечении срока отвечают «Этот запрос уже неактуален…» и backend не вызывают.
+  Во время обработки другого запроса «Да, верно» получает сообщение о занятости, текст сохраняется.
   Ошибка или пустой ответ backend — честное «Не получилось обработать запрос…».
 
 - Mini App (v2.9). При заданном `MAX_MINI_APP_BOT` приветствие (`bot_started`, `/start`, `/help`) несёт кнопку
@@ -245,6 +254,7 @@ PostgreSQL events (reminder, scheduled_at наступил) ─▶ ReminderSched
 | --- | --- | --- | --- | --- |
 | `it-gorky:v1:bot:busy:<owner_id hex>` | string: `job_id` | роль 2 | `BOT_BUSY_TTL_S` (180 с) | один активный запрос; снимает только владелец `job_id` (Lua compare-and-delete) |
 | `it-gorky:v1:bot:event:<event_id hex>` | string `"1"` | роль 2 | 9 ч | дедупликация повторной доставки (MAX повторяет до 8 ч) |
+| `it-gorky:v1:bot:voice:<owner_id hex>` | string: JSON (`id`, `request_id`, `source_event_id`, `chat_id`, `received_at`, `timezone`, `text`) | роль 2 | 15 мин | распознанный голос ждёт «Да, верно» / «Нет»; один на пользователя, новый заменяет старый; забирается Lua-скриптом только при совпадении `id` (v2.10) |
 | `it-gorky:v1:bot:reminder:<reminder_id hex>:<unix time>` | string `"1"` (`"invalid"` для пропущенной записи) | роль 2, временно | 25 ч (окно 1 ч + сутки) | напоминание уже опубликовано; пишет и читает только временный планировщик |
 | `it-gorky:v1:notifications:*` | stream | роль 1 / роль 2 | нет | раздел 6 |
 | `assistant:history:<user_id>` | list | роль 3 / роль 1 | 7 дней | история диалога, ботом не используется |
@@ -277,11 +287,11 @@ PostgreSQL events (reminder, scheduled_at наступил) ─▶ ReminderSched
 
 | Метрика | Тип | Метки |
 | --- | --- | --- |
-| `assistant_bot_updates_total` | counter | `kind` (`text`, `audio`, `start`, `other`), `outcome` (`accepted`, `busy`, `welcomed`, `unsupported`, `invalid_input`, `duplicate`, `ignored`, `no_payload`, `rejected`, `unauthorized`, `invalid`, `error`, `app_offered`) |
-| `assistant_bot_send_total` | counter | `purpose` (`welcome`, `status`, `transcript`, `reply`, `busy`, `error`, `edit`, `repeat`, `app`), `outcome` (`delivered`, `retryable_failure`, `permanent_failure`, `unknown`) |
+| `assistant_bot_updates_total` | counter | `kind` (`text`, `audio`, `start`, `other`), `outcome` (`accepted`, `busy`, `welcomed`, `unsupported`, `invalid_input`, `duplicate`, `ignored`, `no_payload`, `rejected`, `unauthorized`, `invalid`, `error`, `app_offered`, `expired`) |
+| `assistant_bot_send_total` | counter | `purpose` (`welcome`, `status`, `transcript`, `reply`, `busy`, `error`, `edit`, `repeat`, `app`, `confirm`), `outcome` (`delivered`, `retryable_failure`, `permanent_failure`, `unknown`) |
 | `assistant_bot_send_seconds` | histogram | `purpose` |
 | `assistant_bot_audio_fetch_total` | counter | `outcome` (`ok`, `source_error`, `too_large`, `fetch_error`) |
-| `assistant_bot_processing_total` | counter | `outcome` (`replied`, `not_heard`, `audio_error`, `asr_error`, `timeout`, `failed`, `cancelled`) |
+| `assistant_bot_processing_total` | counter | `outcome` (`replied`, `awaiting_confirmation`, `not_heard`, `audio_error`, `asr_error`, `timeout`, `failed`, `cancelled`) |
 | `assistant_bot_notification_deliveries_total` | counter | `status` (`delivered`, `retrying`, `dead_lettered`), `outcome` (исходы контракта) |
 | `assistant_bot_reminders_published_total` | counter | — |
 
@@ -333,3 +343,4 @@ PostgreSQL events (reminder, scheduled_at наступил) ─▶ ReminderSched
 | v2.7 | 2026-10-27 | Напоминания: `DeliveryConsumer` (поток `max-delivery-v1` → `POST /messages?user_id=`), `MaxClient.send_to_user`, временный `ReminderScheduler` (PostgreSQL только чтение, ключ `bot:reminder`), запуск вместе с ботом и флаг `--no-reminders`, метрики доставки. Контракт `docs/notification-stream.md` не менялся |
 | v2.8 | 2026-10-27 | Без изменения контракта: `oneme.ru` снова разрешён по умолчанию (терялся при слиянии); отправки одному адресату не чаще одной в 0,5 с; тесты сбоя записи результата доставки и отсутствия текстов и секретов в логах; уточнены подписка (`message_callback`), команда туннеля и открытые вопросы |
 | v2.9 | 2026-10-30 | Кнопка Mini App: `AppButton` (`open_app`) в `Buttons`/`Sender.send_text`, приветствие с кнопкой и команда `/app` при `MAX_MINI_APP_BOT`, исход `app_offered`, `purpose="app"`. Входной контракт `Backend` не менялся; реализация `Sender` роли 1 должна принимать `AppButton` в `buttons` |
+| v2.10 | 2026-10-30 | Подтверждение голоса: «Распознано: … Все верно?» с кнопками `voice:yes:<id>` / `voice:no:<id>`, ключ `bot:voice` (15 мин), `CallbackPressed.message_id`, исходы `expired` и `awaiting_confirmation`, `purpose="confirm"`. Контракт `Backend` не менялся: на backend по-прежнему приходит только текст, после подтверждения |

@@ -1,6 +1,7 @@
 """In-memory doubles of the bot ports; no MAX, Redis, ASR or LLM."""
 
 import asyncio
+import json
 from collections.abc import Coroutine
 from datetime import UTC, datetime
 
@@ -51,6 +52,7 @@ class FakeGate:
     def __init__(self) -> None:
         self.events: set[str] = set()
         self.locks: dict[str, str] = {}
+        self.voices: dict[str, str] = {}
         self.fail = False
 
     async def first_seen(self, event_id: str) -> bool:
@@ -78,6 +80,15 @@ class FakeGate:
             return False
         del self.locks[owner_id]
         return True
+
+    async def save_voice(self, owner_id: str, pending: str) -> None:
+        self.voices[owner_id] = pending
+
+    async def take_voice(self, owner_id: str, pending_id: str) -> str | None:
+        pending = self.voices.get(owner_id)
+        if pending is None or json.loads(pending)["id"] != pending_id:
+            return None
+        return self.voices.pop(owner_id)
 
 
 class FakeBackend:

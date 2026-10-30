@@ -1,4 +1,6 @@
 import asyncio
+import json
+from datetime import timedelta
 
 import pytest
 
@@ -57,16 +59,94 @@ async def test_text_goes_to_backend_and_reply_is_shown() -> None:
     assert not gate.locks  # type: ignore[attr-defined]
 
 
-async def test_voice_goes_through_asr_without_transcript_message() -> None:
+def pending_text(parts: dict[str, object]) -> str:
+    return str(json.loads(parts["gate"].voices["42"])["text"])  # type: ignore[attr-defined]
+
+
+def pending_id(parts: dict[str, object]) -> str:
+    return str(json.loads(parts["gate"].voices["42"])["id"])  # type: ignore[attr-defined]
+
+
+async def test_voice_is_shown_for_confirmation_before_backend() -> None:
+    bot, parts = build_bot()
+    sender = parts["sender"]
+    await bot.handle(VOICE)
+    await parts["submit"].drain()  # type: ignore[attr-defined]
+    assert parts["recognizer"].calls == [(b"OggS-audio", ".ogg")]  # type: ignore[attr-defined]
+    assert sender.texts == [  # type: ignore[attr-defined]
+        messages.ACCEPTED,
+        "Распознано: напомни завтра позвонить Ивану\nВсе верно?",
+    ]
+    key = pending_id(parts)
+    assert sender.buttons[-1] == (  # type: ignore[attr-defined]
+        ("Да, верно", f"voice:yes:{key}"),
+        ("Нет", f"voice:no:{key}"),
+    )
+    assert sender.deleted == ["mid.1"]  # type: ignore[attr-defined]
+    assert not parts["backend"].requests  # type: ignore[attr-defined]
+    assert not parts["gate"].locks  # type: ignore[attr-defined]
+
+
+async def test_yes_deletes_confirmation_and_sends_text_with_original_time() -> None:
+    later = NOW + timedelta(minutes=5)
+    clock = iter([NOW, later])
+    bot, parts = build_bot(clock=lambda: next(clock))
+    sender = parts["sender"]
+    await bot.handle(VOICE)
+    await parts["submit"].drain()  # type: ignore[attr-defined]
+    key = pending_id(parts)
+    pressed = CallbackPressed(
+        callback_id="cb.7", payload=f"voice:yes:{key}", owner_id="42", chat_id="777", message_id="mid.c"
+    )
+    assert await bot.handle(pressed) == "accepted"
+    await parts["submit"].drain()  # type: ignore[attr-defined]
+    assert sender.deleted == ["mid.1", "mid.c"]  # type: ignore[attr-defined]
+    assert sender.texts[-2:] == [messages.ACCEPTED, "Записал задачу «Отчёт»"]  # type: ignore[attr-defined]
+    request = parts["backend"].requests[0]  # type: ignore[attr-defined]
+    assert request.text == "напомни завтра позвонить Ивану"
+    assert request.reference_time == NOW  # the moment the voice arrived, not the press
+    assert parts["recognizer"].calls == [(b"OggS-audio", ".ogg")]  # type: ignore[attr-defined]
+    assert not parts["gate"].voices and not parts["gate"].locks  # type: ignore[attr-defined]
+
+
+async def test_no_asks_to_repeat_and_drops_the_transcript() -> None:
     bot, parts = build_bot()
     await bot.handle(VOICE)
     await parts["submit"].drain()  # type: ignore[attr-defined]
-    assert parts["sender"].texts == [  # type: ignore[attr-defined]
-        messages.ACCEPTED,
-        "Записал задачу «Отчёт»",
-    ]
-    assert parts["recognizer"].calls == [(b"OggS-audio", ".ogg")]  # type: ignore[attr-defined]
-    assert parts["backend"].requests[0].text == "напомни завтра позвонить Ивану"  # type: ignore[attr-defined]
+    key = pending_id(parts)
+    assert await bot.handle(press(f"voice:no:{key}")) == "repeat_requested"
+    assert parts["sender"].texts[-1] == messages.REPEAT_REQUEST  # type: ignore[attr-defined]
+    assert not parts["gate"].voices  # type: ignore[attr-defined]
+    # A late "yes" on the same message no longer sends anything to the backend.
+    assert await bot.handle(press(f"voice:yes:{key}", callback_id="cb.2")) == "expired"
+    assert parts["sender"].texts[-1] == messages.VOICE_EXPIRED  # type: ignore[attr-defined]
+    assert not parts["backend"].requests  # type: ignore[attr-defined]
+    assert not parts["gate"].locks  # type: ignore[attr-defined]
+
+
+async def test_newer_voice_makes_older_buttons_stale() -> None:
+    bot, parts = build_bot()
+    await bot.handle(VOICE)
+    await parts["submit"].drain()  # type: ignore[attr-defined]
+    old = pending_id(parts)
+    await bot.handle(voice(AudioRef(url="https://media.max.ru/b.ogg", suffix=".ogg"), mid="mid.3"))
+    await parts["submit"].drain()  # type: ignore[attr-defined]
+    assert pending_id(parts) != old
+    assert await bot.handle(press(f"voice:yes:{old}")) == "expired"
+    assert not parts["backend"].requests  # type: ignore[attr-defined]
+
+
+async def test_yes_while_busy_keeps_the_transcript() -> None:
+    bot, parts = build_bot()
+    await bot.handle(VOICE)
+    await parts["submit"].drain()  # type: ignore[attr-defined]
+    key = pending_id(parts)
+    parts["gate"].locks["42"] = "other-job"  # type: ignore[attr-defined]
+    assert await bot.handle(press(f"voice:yes:{key}")) == "busy"
+    assert parts["sender"].texts[-1] == messages.BUSY  # type: ignore[attr-defined]
+    assert pending_id(parts) == key
+    del parts["gate"].locks["42"]  # type: ignore[attr-defined]
+    assert await bot.handle(press(f"voice:yes:{key}", callback_id="cb.2")) == "accepted"
 
 
 @pytest.mark.parametrize("mode", ["missing_id", "edit_rejected", "edit_exception"])
@@ -312,7 +392,7 @@ async def test_max_transcription_is_used_without_our_asr() -> None:
     ref = AudioRef(url="https://media.max.ru/a.ogg", suffix=".ogg", transcription="позвони маме")
     await bot.handle(voice(ref))
     await parts["submit"].drain()  # type: ignore[attr-defined]
-    assert parts["backend"].requests[0].text == "позвони маме"  # type: ignore[attr-defined]
+    assert pending_text(parts) == "позвони маме"
     assert parts["audio"].urls == []  # type: ignore[attr-defined]
 
 
@@ -320,7 +400,7 @@ async def test_max_transcription_is_used_when_url_is_missing() -> None:
     bot, parts = build_bot()
     await bot.handle(voice(AudioRef(url="", suffix="", transcription="встреча в 15")))
     await parts["submit"].drain()  # type: ignore[attr-defined]
-    assert parts["backend"].requests[0].text == "встреча в 15"  # type: ignore[attr-defined]
+    assert pending_text(parts) == "встреча в 15"
 
 
 async def test_voice_without_url_and_transcription() -> None:
@@ -337,7 +417,7 @@ async def test_asr_failure_falls_back_to_max_transcription() -> None:
     bot, parts = build_bot(recognizer=recognizer)
     await bot.handle(voice(AudioRef(url="https://media.max.ru/a.ogg", suffix=".ogg", transcription="отчёт")))
     await parts["submit"].drain()  # type: ignore[attr-defined]
-    assert parts["backend"].requests[0].text == "отчёт"  # type: ignore[attr-defined]
+    assert pending_text(parts) == "отчёт"
 
 
 async def test_limits_are_not_bypassed_by_transcription() -> None:

@@ -61,6 +61,7 @@ class CallbackPressed:
     payload: str
     owner_id: str
     chat_id: str | None  # from the message with the keyboard; None if MAX did not include it
+    message_id: str | None = None  # mid of the message with the keyboard, to delete it
 
 
 BotEvent = BotStarted | MessageCreated | CallbackPressed | Ignored
@@ -144,15 +145,20 @@ def _callback(update: dict[str, object]) -> CallbackPressed:
     payload = callback.get("payload")
     owner_id = _id(_object(callback.get("user"), "callback user").get("user_id"), "user_id")
     chat_id: str | None = None
+    message_id: str | None = None
     message = update.get("message")
     if isinstance(message, dict) and isinstance(message.get("recipient"), dict):
         raw_chat = message["recipient"].get("chat_id")
         chat_id = _id(raw_chat, "chat_id") if raw_chat is not None else None
+    if isinstance(message, dict) and isinstance(message.get("body"), dict):
+        raw_mid = message["body"].get("mid")
+        message_id = _id(raw_mid, "mid") if raw_mid is not None else None
     return CallbackPressed(
         callback_id=callback_id,
         payload=payload if isinstance(payload, str) else "",
         owner_id=owner_id,
         chat_id=chat_id,
+        message_id=message_id,
     )
 
 

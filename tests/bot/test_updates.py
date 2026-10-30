@@ -164,7 +164,7 @@ def test_message_callback() -> None:
         "message": {"recipient": {"chat_id": 777}, "body": {"mid": "mid.9", "text": "Вы сказали"}},
     }
     assert parse_update(raw) == CallbackPressed(
-        callback_id="cb.1", payload="confirm:no", owner_id="42", chat_id="777"
+        callback_id="cb.1", payload="confirm:no", owner_id="42", chat_id="777", message_id="mid.9"
     )
     del raw["message"]
     assert parse_update(raw) == CallbackPressed(
