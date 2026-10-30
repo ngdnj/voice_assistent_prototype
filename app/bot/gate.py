@@ -2,7 +2,9 @@
 
 Keys (INTEGRATION.md §6), user ids UTF-8 hex encoded as in app/storage/redis_index.py:
 - `<prefix>:v1:bot:busy:<owner hex>` — string `job_id`, TTL BOT_BUSY_TTL_S;
-- `<prefix>:v1:bot:event:<event hex>` — string "1", TTL EVENT_TTL_S.
+- `<prefix>:v1:bot:event:<event hex>` — string "1", TTL EVENT_TTL_S;
+- `<prefix>:v1:bot:voice:<owner hex>` — JSON of the recognized voice awaiting "Да, верно"/"Нет",
+  TTL VOICE_CONFIRM_TTL_S; only the latest one per user is kept.
 The lock has an owner (`job_id`) and a TTL, so a crashed process cannot block a user forever.
 """
 
@@ -12,12 +14,22 @@ from redis.asyncio import Redis
 
 # MAX retries a webhook for up to 8 hours; keep event ids a little longer.
 EVENT_TTL_S = 9 * 3600
+# How long a recognized voice message waits for the user's confirmation.
+VOICE_CONFIRM_TTL_S = 15 * 60
 
 # Delete only our own lock: a late finisher must not release a newer request's lock.
 RELEASE = """if redis.call('GET', KEYS[1]) == ARGV[1] then
     return redis.call('DEL', KEYS[1])
 end
 return 0"""
+
+# Take the pending voice only if it is the one the button refers to (older buttons are stale).
+TAKE_VOICE = """local value = redis.call('GET', KEYS[1])
+if value and cjson.decode(value)['id'] == ARGV[1] then
+    redis.call('DEL', KEYS[1])
+    return value
+end
+return false"""
 
 
 class Gate(Protocol):
@@ -26,6 +38,8 @@ class Gate(Protocol):
     async def is_busy(self, owner_id: str) -> bool: ...
     async def acquire(self, owner_id: str, job_id: str) -> bool: ...
     async def release(self, owner_id: str, job_id: str) -> bool: ...
+    async def save_voice(self, owner_id: str, pending: str) -> None: ...
+    async def take_voice(self, owner_id: str, pending_id: str) -> str | None: ...
 
 
 def _hex(value: str) -> str:
@@ -62,3 +76,15 @@ class RedisGate:
 
     async def release(self, owner_id: str, job_id: str) -> bool:
         return bool(await self._client.eval(RELEASE, 1, self.busy_key(owner_id), job_id))
+
+    def voice_key(self, owner_id: str) -> str:
+        return f"{self._prefix}:v1:bot:voice:{_hex(owner_id)}"
+
+    async def save_voice(self, owner_id: str, pending: str) -> None:
+        """Keep the recognized text (JSON with an `id`) until the user confirms or rejects it."""
+        await self._client.set(self.voice_key(owner_id), pending, ex=VOICE_CONFIRM_TTL_S)
+
+    async def take_voice(self, owner_id: str, pending_id: str) -> str | None:
+        """Atomically remove and return the pending voice with this id; None if expired or replaced."""
+        value = await self._client.eval(TAKE_VOICE, 1, self.voice_key(owner_id), pending_id)
+        return value if isinstance(value, str) else None

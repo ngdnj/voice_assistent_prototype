@@ -51,6 +51,7 @@ Outcome = Literal[
     "confirmed",
     "repeat_requested",
     "app_offered",
+    "expired",
 ]
 
 Buttons = tuple[Button, ...]  # one row: (text, callback payload) or AppButton
@@ -107,6 +108,22 @@ Submit = Callable[[Coroutine[object, object, None]], bool]
 def log_event(event: str, **ids: str | UUID) -> None:
     """Only fixed event names and correlation ids; never texts, audio or exceptions."""
     LOGGER.info(json.dumps({"event": event, **{key: str(value) for key, value in ids.items()}}))
+
+
+def _confirmed_message(pending: str, owner_id: str) -> IncomingMessage:
+    """Rebuild the voice request as text; ids and the time anchor stay those of the voice message."""
+    data = json.loads(pending)
+    return IncomingMessage(
+        request_id=UUID(data["request_id"]),
+        source_event_id=data["source_event_id"],
+        channel="max",
+        owner_id=owner_id,
+        chat_id=data["chat_id"],
+        received_at=datetime.fromisoformat(data["received_at"]),
+        timezone=data["timezone"],
+        text=data["text"],
+        audio_ref=None,
+    )
 
 
 class BackgroundRunner:
@@ -239,6 +256,10 @@ class BotService:
             await self._send(incoming.chat_id, messages.BUSY, "busy")
             log_event("busy", request_id=incoming.request_id)
             return "busy"
+        return await self._admit(incoming, job_id)
+
+    async def _admit(self, incoming: IncomingMessage, job_id: str) -> Outcome:
+        """With the user's lock held: show the status and hand the request to the runner."""
         try:
             status = await self._send(incoming.chat_id, messages.ACCEPTED, "status")
             status_id = status.external_message_id if status.ok else ""
@@ -259,6 +280,10 @@ class BotService:
         code = await self._sender.answer_callback(callback_id=event.callback_id)
         if code:
             log_event("callback_answer_failed", error_code=code)
+        for prefix in (messages.VOICE_YES, messages.VOICE_NO):
+            if event.payload.startswith(prefix) and len(event.payload) > len(prefix):
+                pending_id = event.payload.removeprefix(prefix)
+                return await self._voice_answer(event, prefix == messages.VOICE_YES, pending_id)
         if event.payload == messages.CONFIRM_YES:
             return "confirmed"  # No action yet: confirmation is wired to the backend later.
         if event.payload != messages.CONFIRM_NO:
@@ -272,6 +297,40 @@ class BotService:
         # The next message is an ordinary new request: no special state is needed to wait for it.
         await self._send(event.chat_id, messages.REPEAT_REQUEST, "repeat")
         return "repeat_requested"
+
+    async def _voice_answer(self, event: CallbackPressed, confirmed: bool, pending_id: str) -> Outcome:
+        """ "Да, верно" sends the recognized text to the backend; "Нет" asks to repeat the request."""
+        if event.chat_id is None:
+            log_event("callback_without_chat")
+            return "ignored"
+        if await self._gate.is_busy(event.owner_id):
+            await self._send(event.chat_id, messages.BUSY, "busy")
+            return "busy"
+        if not confirmed:
+            await self._gate.take_voice(event.owner_id, pending_id)
+            await self._send(event.chat_id, messages.REPEAT_REQUEST, "repeat")
+            return "repeat_requested"
+        job_id = str(uuid4())
+        if not await self._gate.acquire(event.owner_id, job_id):
+            await self._send(event.chat_id, messages.BUSY, "busy")
+            return "busy"
+        try:
+            pending = await self._gate.take_voice(event.owner_id, pending_id)
+        except BaseException:
+            await asyncio.shield(self._release(event.owner_id, job_id))
+            raise
+        if pending is None:
+            # Expired or replaced by a newer voice message: never guess which text was meant.
+            await self._release(event.owner_id, job_id)
+            await self._send(event.chat_id, messages.VOICE_EXPIRED, "error")
+            return "expired"
+        incoming = _confirmed_message(pending, event.owner_id)
+        if event.message_id:
+            code = await self._sender.delete_message(message_id=event.message_id)
+            if code:
+                log_event("confirmation_delete_failed", error_code=code)
+        log_event("voice_confirmed", request_id=incoming.request_id)
+        return await self._admit(incoming, job_id)
 
     async def _welcome(self, owner_id: str, chat_id: str) -> Outcome:
         # "Other functions" are unavailable while a request is processed, including the greeting.
@@ -348,7 +407,7 @@ class BotService:
             # Replies with buttons cannot be produced by editing the status: send them separately.
             if isinstance(reply, Reply):
                 if reply.buttons:
-                    purpose = "reply" if outcome == "replied" else "error"
+                    purpose = {"replied": "reply", "awaiting_confirmation": "confirm"}.get(outcome, "error")
                     await self._reply_with_buttons(incoming.chat_id, status_id, reply, purpose)
                     reply = None
                 else:
@@ -371,7 +430,8 @@ class BotService:
             recognized, outcome = await self._recognize(incoming)
             if recognized is None:
                 return outcome
-            text = recognized
+            # The user confirms the transcript first; the backend gets it after "Да, верно".
+            return await self._ask_confirmation(incoming, recognized), "awaiting_confirmation"
         if text is None:
             raise ValueError("Message has no text to process")
         reply = await self._backend.answer(
@@ -388,6 +448,27 @@ class BotService:
         if not (reply.text if isinstance(reply, Reply) else reply).strip():
             return messages.FAILED, "failed"
         return reply, "replied"
+
+    async def _ask_confirmation(self, incoming: IncomingMessage, text: str) -> Reply:
+        """Save the transcript with the original time anchor and build the "Все верно?" message."""
+        pending_id = uuid4().hex
+        pending = {
+            "id": pending_id,
+            "request_id": str(incoming.request_id),
+            "source_event_id": incoming.source_event_id,
+            "chat_id": incoming.chat_id,
+            # reference_time of the request stays the moment the voice arrived (root AGENTS §7).
+            "received_at": incoming.received_at.isoformat(),
+            "timezone": incoming.timezone,
+            "text": text,
+        }
+        await self._gate.save_voice(incoming.owner_id, json.dumps(pending, ensure_ascii=False))
+        log_event("voice_awaiting_confirmation", request_id=incoming.request_id)
+        buttons: Buttons = (
+            (messages.VOICE_YES_TEXT, messages.VOICE_YES + pending_id),
+            (messages.VOICE_NO_TEXT, messages.VOICE_NO + pending_id),
+        )
+        return Reply(messages.VOICE_CONFIRM.format(text=text), buttons)
 
     async def _recognize(self, incoming: IncomingMessage) -> tuple[str | None, tuple[str, str]]:
         """Return recognized text, or None and the (reply, outcome) to send instead.

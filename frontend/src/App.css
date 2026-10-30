@@ -1,3 +1,46 @@
+/* Цвета темы: тёмная по умолчанию, светлая при data-theme="light" на <html> (theme.ts). */
+:root {
+  --app-page-bg: radial-gradient(circle at 50% 0%, #1a1a2e 0%, #0f0f12 55%);
+  --app-text: #f1f1f1;
+  --app-muted: #888;
+  --app-faint: #555;
+  --app-empty: #666;
+  --app-tab-hover: #ccc;
+  --app-surface: #16161b;
+  --app-input-bg: #1c1c22;
+  --app-border: #2d2d35;
+  --app-card-border: #222228;
+  --app-card-border-hover: #333340;
+  --app-divider: #35353f;
+  --app-shadow: rgba(0, 0, 0, 0.25);
+  --app-title: linear-gradient(90deg, #ffffff, #a9b8ff);
+  --app-error: #ff6b6b;
+  --app-in-progress: #e0a526;
+  --app-done: #4caf7d;
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --app-page-bg: radial-gradient(circle at 50% 0%, #e8ecff 0%, #f6f6f9 55%);
+  --app-text: #1d1d24;
+  --app-muted: #6b6b78;
+  --app-faint: #a0a0ac;
+  --app-empty: #8a8a96;
+  --app-tab-hover: #333;
+  --app-surface: #ffffff;
+  --app-input-bg: #ffffff;
+  --app-border: #d9d9e2;
+  --app-card-border: #e4e4ec;
+  --app-card-border-hover: #c9c9d6;
+  --app-divider: #d4d4de;
+  --app-shadow: rgba(20, 20, 40, 0.08);
+  --app-title: linear-gradient(90deg, #1d1d24, #4e7fff);
+  --app-error: #d93636;
+  --app-in-progress: #b7790f;
+  --app-done: #2e8b57;
+  color-scheme: light;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -5,8 +48,8 @@
 body {
   margin: 0;
   min-height: 100vh;
-  background: radial-gradient(circle at 50% 0%, #1a1a2e 0%, #0f0f12 55%);
-  color: #f1f1f1;
+  background: var(--app-page-bg);
+  color: var(--app-text);
   font-family: "Segoe UI", system-ui, sans-serif;
 }
 
@@ -14,6 +57,29 @@ body {
   max-width: 480px;
   margin: 0 auto;
   padding: 32px 16px 60px;
+  position: relative;
+}
+
+.theme-toggle {
+  position: absolute;
+  top: 24px;
+  right: 16px;
+  width: 40px;
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  border: 1px solid var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-text);
+  cursor: pointer;
+  box-shadow: 0 2px 8px var(--app-shadow);
+  transition: border-color 0.15s;
+}
+
+.theme-toggle:hover {
+  border-color: var(--app-card-border-hover);
 }
 
 h1 {
@@ -33,24 +99,24 @@ h1 {
 }
 
 .period input {
-  background: #1c1c22;
-  color: #f1f1f1;
-  border: 1px solid #2d2d35;
+  background: var(--app-input-bg);
+  color: var(--app-text);
+  border: 1px solid var(--app-border);
   border-radius: 10px;
   padding: 8px 10px;
   font-size: 13px;
-  color-scheme: dark;
+  color-scheme: inherit;
 }
 
 .period span {
-  color: #555;
+  color: var(--app-faint);
 }
 
 .tabs {
   display: flex;
   gap: 6px;
   margin-bottom: 24px;
-  background: #16161b;
+  background: var(--app-surface);
   padding: 4px;
   border-radius: 14px;
 }
@@ -61,7 +127,7 @@ h1 {
   border: none;
   border-radius: 10px;
   background: transparent;
-  color: #888;
+  color: var(--app-muted);
   font-size: 14px;
   font-weight: 500;
   cursor: pointer;
@@ -69,7 +135,7 @@ h1 {
 }
 
 .tab:hover {
-  color: #ccc;
+  color: var(--app-tab-hover);
 }
 
 .tab-active {
@@ -79,7 +145,7 @@ h1 {
 
 .tab-divider {
   width: 1px;
-  background: #2a2a33;
+  background: var(--app-divider);
   margin: 4px 0;
 }
 
@@ -94,7 +160,7 @@ h1 {
   top: 25%;
   bottom: 25%;
   width: 1px;
-  background: #35353f;
+  background: var(--app-divider);
 }
 
 .event-list {
@@ -107,26 +173,26 @@ h1 {
 }
 
 .event-card {
-  background: #16161b;
-  border: 1px solid #222228;
+  background: var(--app-surface);
+  border: 1px solid var(--app-card-border);
   border-radius: 14px;
   padding: 16px;
   transition: border-color 0.15s;
 }
 
 .event-card {
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 2px 8px var(--app-shadow);
 }
 
 h1 {
-  background: linear-gradient(90deg, #ffffff, #a9b8ff);
+  background: var(--app-title);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
 }
 
 .event-card:hover {
-  border-color: #333340;
+  border-color: var(--app-card-border-hover);
 }
 
 .event-card-main {
@@ -154,37 +220,37 @@ h1 {
 
 .event-moment {
   font-size: 13px;
-  color: #888;
+  color: var(--app-muted);
 }
 
 .status-select {
   width: 100%;
   padding: 9px 10px;
   border-radius: 9px;
-  border: 1px solid #2d2d35;
-  background: #1c1c22;
-  color: #f1f1f1;
+  border: 1px solid var(--app-border);
+  background: var(--app-input-bg);
+  color: var(--app-text);
   font-size: 13px;
   cursor: pointer;
 }
 
 .status-todo {
-  border-color: #555;
+  border-color: var(--app-faint);
 }
 
 .status-in_progress {
-  border-color: #e0a526;
-  color: #e0a526;
+  border-color: var(--app-in-progress);
+  color: var(--app-in-progress);
 }
 
 .status-done {
-  border-color: #4caf7d;
-  color: #4caf7d;
+  border-color: var(--app-done);
+  color: var(--app-done);
 }
 
 .empty-state {
   text-align: center;
-  color: #666;
+  color: var(--app-empty);
   margin-top: 50px;
 }
 
@@ -196,12 +262,12 @@ h1 {
 
 .status-message {
   text-align: center;
-  color: #888;
+  color: var(--app-muted);
   margin-top: 40px;
 }
 
 .status-error {
-  color: #ff6b6b;
+  color: var(--app-error);
 }
 
 .search-input {
@@ -210,12 +276,12 @@ h1 {
   padding: 10px 14px;
   margin-bottom: 14px;
   border-radius: 10px;
-  border: 1px solid #2d2d35;
-  background: #1c1c22;
-  color: #f1f1f1;
+  border: 1px solid var(--app-border);
+  background: var(--app-input-bg);
+  color: var(--app-text);
   font-size: 14px;
 }
 
 .search-input::placeholder {
-  color: #666;
+  color: var(--app-empty);
 }

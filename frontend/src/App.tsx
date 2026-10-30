@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import "./App.css";
 import { Tabs } from "./Tabs";
 import { EventList } from "./EventList";
+import { ThemeToggle } from "./ThemeToggle";
+import { applyTheme, type Theme } from "./theme";
 import { fetchEvents, searchEvents, UnauthorizedError, updateTaskStatus } from "./api";
 import type { EventRecord, EventType, TaskStatus } from "./types";
 
@@ -19,7 +21,8 @@ function startOfLocalDay(value: string): Date {
   return new Date(`${value}T00:00:00`);
 }
 
-function App() {
+function App({ initialTheme }: { initialTheme: Theme }) {
+  const [theme, setTheme] = useState<Theme>(initialTheme);
   const [activeTab, setActiveTab] = useState<EventType>("task");
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [status, setStatus] = useState<Status>("loading");
@@ -73,6 +76,12 @@ function App() {
     ? events
     : events.filter((event) => event.event_type === activeTab);
 
+  function toggleTheme() {
+    const next = theme === "dark" ? "light" : "dark";
+    applyTheme(next);
+    setTheme(next);
+  }
+
   async function handleStatusChange(id: string, newStatus: TaskStatus) {
     const previous = events;
     setEvents((prev) =>
@@ -87,6 +96,7 @@ function App() {
 
   return (
     <div className="app">
+      <ThemeToggle theme={theme} onToggle={toggleTheme} />
       <h1>Мои записи</h1>
 
       <input

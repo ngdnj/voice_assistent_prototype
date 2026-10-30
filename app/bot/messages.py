@@ -23,6 +23,14 @@ CONFIRM_YES = "confirm:yes"
 CONFIRM_NO = "confirm:no"
 CONFIRM_YES_TEXT = "Да, все верно"
 CONFIRM_NO_TEXT = "Нет"
+# Recognized voice is shown for confirmation before it reaches the backend.
+VOICE_CONFIRM = "Распознано: {text}\nВсе верно?"
+# Payload prefixes; the pending voice id follows them.
+VOICE_YES = "voice:yes:"
+VOICE_NO = "voice:no:"
+VOICE_YES_TEXT = "Да, верно"
+VOICE_NO_TEXT = "Нет"
+VOICE_EXPIRED = "Этот запрос уже неактуален. Повторите его, пожалуйста."
 NOT_ACCEPTED = "Сейчас не получается принять запрос. Попробуйте ещё раз чуть позже."
 START_COMMANDS = frozenset({"/start", "/help"})
 APP_COMMANDS = frozenset({"/app"})
