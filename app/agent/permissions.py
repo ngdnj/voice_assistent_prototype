@@ -3,6 +3,7 @@
 import re
 
 MUTATIONS = frozenset({"create_event", "update_event", "delete_event", "reschedule_meeting"})
+CONFIRMATION_INSTRUCTION = "\nОтветьте «да» для подтверждения или «нет» для отмены (15 минут)."
 CONFIRM = frozenset({"да", "подтверждаю", "да, подтверждаю", "всё верно", "все верно"})
 CANCEL = frozenset({"нет", "отмена", "не надо", "отменить"})
 OFF_TOPIC_REPLY = (

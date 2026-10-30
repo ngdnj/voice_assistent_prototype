@@ -59,15 +59,9 @@ async def test_readonly_voice_reaches_backend_without_confirmation(text):
         "Создай задачу купить хлеб",
         "Создай встречу завтра в 10",
         "Напомни завтра в 10 позвонить",
-        "Измени задачу отчёт",
-        "Перенеси встречу на 15:00",
-        "Измени напоминание на завтра",
-        "Удали задачу",
-        "Удали встречу",
-        "Удали напоминание",
     ],
 )
-async def test_voice_writes_of_all_types_wait_for_confirmation(text):
+async def test_voice_creation_of_all_types_waits_for_transcript_confirmation(text):
     backend, gate, sender, submit = FakeBackend(), FakeGate(), FakeSender(), Collect()
     bot, _ = build_bot(
         backend=backend, gate=gate, sender=sender, submit=submit, recognizer=FakeRecognizer(text)

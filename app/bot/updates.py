@@ -80,6 +80,8 @@ class IncomingMessage:
     timezone: str
     text: str | None
     audio_ref: AudioRef | None
+    # Set only from a stored callback; never populated from MAX message fields.
+    confirmation_operation_id: str | None = None
 
     def __post_init__(self) -> None:
         if (self.text is None) == (self.audio_ref is None):

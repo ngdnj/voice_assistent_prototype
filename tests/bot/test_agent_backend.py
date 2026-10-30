@@ -35,6 +35,7 @@ async def test_backend_preserves_trusted_context_and_job_identity():
             "timezone": request.timezone,
             "operation_id": request.job_id,
             "request_id": str(request.request_id),
+            "confirmation_operation_id": None,
         }
 
 

@@ -26,7 +26,7 @@ from app.bot.client import MaxClient
 from app.bot.gate import RedisGate
 from app.bot.service import BotService
 from app.bot.settings import BotSettings
-from app.bot.updates import parse_update
+from app.bot.updates import AudioRef, CallbackPressed, MessageCreated, parse_update
 from app.config import Settings
 from app.llm.model import build_chat_model
 from app.mcp_server.__main__ import McpSettings, build_app, build_tools
@@ -37,7 +37,7 @@ from app.storage.redis import RedisSettings, redis_connection
 from evals.cases import CASES
 from evals.run import _run_case
 from tests.agent_support import ScriptedModel, tool
-from tests.bot.fakes import Collect
+from tests.bot.fakes import Collect, FakeAudio, FakeRecognizer, FakeSender
 from tests.storage_pg import integration_settings, migrate_test_database, requires_postgres
 
 NOW = datetime(2026, 10, 23, 8, tzinfo=UTC)
@@ -108,6 +108,70 @@ class AgentIntegrationTests(unittest.IsolatedAsyncioTestCase):
         model = ScriptedModel(responses=[tool(arguments=arguments), AIMessage("Запись создана.")])
         text = "Создай запись" + (" на " + arguments["datetime"] if "datetime" in arguments else "")
         return await Assistant(model, self.gateway, self.history).handle(self.owner, text, **TIME)
+
+    async def test_voice_button_deletes_through_real_mcp_without_second_confirmation(self):
+        created = await self.create(
+            event_type="meeting", name="Голосовой тест", datetime="2026-10-24T13:00:00+03:00"
+        )
+        event_id = created.tool_calls[0].result["created"]["id"]
+        model = ScriptedModel(
+            responses=[
+                tool("get_event_by_query", {"query": "Голосовой тест"}),
+                tool("delete_event", {"event_id": event_id}, call_id="delete"),
+            ]
+        )
+        prefix = f"it-gorky:test:voice-plan:{uuid4()}"
+        gate, sender, collect = RedisGate(self.redis, prefix=prefix), FakeSender(), Collect()
+        bot = BotService(
+            sender=sender,
+            gate=gate,
+            backend=AgentBackend(Assistant(model, self.gateway, self.history)),
+            submit=collect,
+            audio=FakeAudio(),
+            recognizer=FakeRecognizer("Удали встречу «Голосовой тест»"),
+            timezone="Europe/Moscow",
+            processing_timeout_s=10,
+            clock=lambda: NOW,
+        )
+        try:
+            await bot.handle(
+                MessageCreated(
+                    message_id="voice-plan",
+                    chat_id="777",
+                    owner_id=self.owner,
+                    text=None,
+                    audio=AudioRef(url="https://media.max.ru/test.ogg", suffix=".ogg"),
+                )
+            )
+            await collect.drain()
+            async with self.sessions() as session:
+                self.assertIsNone(
+                    await session.scalar(select(events.c.deleted_at).where(events.c.id == event_id))
+                )
+            pending = json.loads(await self.redis.get(gate.voice_key(self.owner)))
+            self.assertEqual(pending["text"], "да")
+            calls_before = len(model.seen)
+            callback = CallbackPressed(
+                callback_id="voice-plan-yes",
+                payload="voice:yes:" + pending["id"],
+                owner_id=self.owner,
+                chat_id="777",
+                message_id="confirmation",
+            )
+            await bot.handle(callback)
+            await collect.drain()
+            self.assertEqual(len(model.seen), calls_before)
+            self.assertTrue(sender.texts[-1].startswith("Удалено:"))
+            async with self.sessions() as session:
+                self.assertIsNotNone(
+                    await session.scalar(select(events.c.deleted_at).where(events.c.id == event_id))
+                )
+            self.assertEqual(await bot.handle(callback), "duplicate")
+        finally:
+            await collect.drain()
+            keys = [key async for key in self.redis.scan_iter(match=prefix + ":*")]
+            if keys:
+                await self.redis.delete(*keys)
 
     async def test_create_all_types_then_period_search_and_owner_isolation(self):
         task = await self.create(event_type="task", name="Подготовить отчёт", date="2026-10-24")
