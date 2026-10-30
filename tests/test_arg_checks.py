@@ -228,17 +228,28 @@ def test_change_without_a_request_is_stopped(text: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "text",
+    ("name", "text"),
     [
-        "Удали встречу с Иваном",
-        "Перенеси её на завтра",
-        "Переименуй задачу в «Отчёт за квартал»",
-        "Отмени созвон с бухгалтерией",
-        "вторую",  # reply to «Какую запись удалить?»
-        "ту, что в пятницу",
-        "Да",
+        ("delete_event", "Удали встречу с Иваном"),
+        ("reschedule_meeting", "Перенеси её на завтра"),
+        ("update_event", "Переименуй задачу в «Отчёт за квартал»"),
+        ("delete_event", "Отмени созвон с бухгалтерией"),
     ],
 )
-def test_requested_change_or_short_reply_passes(text: str) -> None:
-    assert unrequested_change("delete_event", text) is None
-    assert check_args("delete_event", {"event_id": "x"}, text) is None
+def test_requested_operation_passes(name: str, text: str) -> None:
+    assert unrequested_change(name, text) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "вторую",
+        "ту, что в пятницу",
+        "Да",
+        "Не удаляй ничего, только покажи встречи",
+        "Найди запись «Удали всё»",
+    ],
+)
+def test_short_or_quoted_text_needs_trusted_state(text: str) -> None:
+    assert unrequested_change("delete_event", text) == UNREQUESTED_CHANGE_ERROR
+    assert unrequested_change("create_event", text) == UNREQUESTED_CHANGE_ERROR

@@ -23,7 +23,7 @@ CONFIRM_YES = "confirm:yes"
 CONFIRM_NO = "confirm:no"
 CONFIRM_YES_TEXT = "Да, все верно"
 CONFIRM_NO_TEXT = "Нет"
-# Recognized voice is shown for confirmation before it reaches the backend.
+# Voice writes and ambiguous clarifications require transcript confirmation.
 VOICE_CONFIRM = "Распознано: {text}\nВсе верно?"
 # Payload prefixes; the pending voice id follows them.
 VOICE_YES = "voice:yes:"

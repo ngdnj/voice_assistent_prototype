@@ -177,7 +177,7 @@ class AgentIntegrationTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ConnectionError):
             await Assistant(ScriptedModel(responses=[tool()]), LostResponse(), self.history).handle(
                 self.owner,
-                "Отчёт",
+                "Создай задачу Отчёт",
                 operation_id=operation,
                 **TIME,
             )
@@ -185,8 +185,8 @@ class AgentIntegrationTests(unittest.IsolatedAsyncioTestCase):
         model = ScriptedModel(responses=[AIMessage("Задача создана.")])
         # A new repository instance reads the pending plan from Redis.
         agent = Assistant(model, actual, RedisChatHistory(self.redis))
-        reply = await agent.handle(self.owner, "Отчёт", operation_id=operation, **TIME)
-        repeated = await agent.handle(self.owner, "Отчёт", operation_id=operation, **TIME)
+        reply = await agent.handle(self.owner, "Создай задачу Отчёт", operation_id=operation, **TIME)
+        repeated = await agent.handle(self.owner, "Создай задачу Отчёт", operation_id=operation, **TIME)
         self.assertEqual(await self.count(), 1)
         self.assertEqual(repeated.tool_calls[0].result, reply.tool_calls[0].result)
         self.assertEqual(len(model.seen), 1)
@@ -218,7 +218,7 @@ class AgentIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.history.load(self.owner, "private"), [])
 
     async def test_cli_composes_the_same_backend_and_does_not_log_content(self):
-        secret_text = "private-user-content-please-do-not-log"
+        secret_text = "Создай задачу private-user-content-please-do-not-log"
         model = ScriptedModel(responses=[tool(), AIMessage("Задача создана.")])
         args = argparse.Namespace(
             owner_id=self.owner,

@@ -1,9 +1,10 @@
 """REST records API for the MAX Mini App; same operations and DTOs as the MCP tools."""
 
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Annotated, Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, Header, Query, Request
@@ -16,6 +17,7 @@ from app.mcp_server.schemas import error
 from app.mcp_server.tools import EventTools
 
 INIT_DATA_HEADER = "X-Max-Init-Data"
+ACTION_ID_HEADER = "X-Action-Id"
 INIT_DATA_MAX_AGE = timedelta(days=1)
 
 # Structured error codes map to HTTP statuses; the body keeps the MCP error format.
@@ -135,5 +137,24 @@ def build_records_router(
 
         # A status change involves no local dates, so the zone does not matter here.
         return await respond("update_task_status", owner, "UTC", change)
+
+    @router.delete("/events/{event_id}")
+    async def delete_event(
+        owner: Owner,
+        event_id: str,
+        action_id: Annotated[str | None, Header(alias=ACTION_ID_HEADER)] = None,
+    ) -> JSONResponse:
+        async def remove(caller: TrustedContext) -> dict[str, Any]:
+            # The adapter establishes identity first; a UUID correlates retries, not users.
+            try:
+                if action_id is None or len(action_id) > 200:
+                    raise ValueError("missing or excessive action id")
+                operation_id = str(UUID(action_id))
+            except ValueError:
+                return error("validation_error", "Передайте UUID операции в X-Action-Id", ACTION_ID_HEADER)
+            return await tools.delete_event(replace(caller, action_id=operation_id), {"event_id": event_id})
+
+        # Deletion has no local dates. Neither body nor query can set the record's owner.
+        return await respond("delete_event", owner, "UTC", remove)
 
     return router

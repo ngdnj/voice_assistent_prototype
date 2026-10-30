@@ -4,12 +4,13 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import ColumnElement, and_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 
 from app.planner.meeting import Meeting
 from app.planner.meeting_repository import MeetingAlreadyExistsError, MeetingStorageError
 from app.planner.operation import CreationOperation, OperationConflictError
+from app.planner.query import RecordQuery
 from app.storage.postgres.records import PostgresEventStore, RecordRow, require
 from app.storage.postgres.tables import events, operations
 
@@ -19,8 +20,22 @@ class PostgresMeetingRepository(PostgresEventStore[Meeting]):
     operation_type = "create_meeting"
     storage_error = MeetingStorageError
     already_exists_error = MeetingAlreadyExistsError
-    # Meetings that start in the period, as in the Redis adapter.
+    # Meetings with an explicit end are visible throughout their interval.
     period_column = "scheduled_at"
+
+    def _period(self, query: RecordQuery) -> tuple[ColumnElement[Any], list[ColumnElement[bool]]]:
+        start, end = events.c.scheduled_at, events.c.ends_at
+        conditions: list[ColumnElement[bool]] = []
+        if query.start_time is not None:
+            conditions.append(
+                or_(
+                    end > query.start_time,
+                    and_(end.is_(None), start >= query.start_time),
+                )
+            )
+        if query.end_time is not None:
+            conditions.append(start < query.end_time)
+        return start, conditions
 
     def _to_row(self, record: Meeting) -> dict[str, Any]:
         return {

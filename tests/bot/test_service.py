@@ -4,6 +4,7 @@ from datetime import timedelta
 
 import pytest
 
+from app.agent.permissions import OFF_TOPIC_REPLY
 from app.asr.audio import AudioDecodeError
 from app.asr.base import AsrError, AudioTooLongError
 from app.bot import messages
@@ -31,6 +32,72 @@ VOICE = MessageCreated(
     text=None,
     audio=AudioRef(url="https://media.max.ru/a.ogg", suffix=".ogg"),
 )
+
+
+@pytest.mark.parametrize(
+    "text", ["Какие встречи завтра?", "Покажи задачи", "Найди напоминание", "Мои планы на завтра"]
+)
+async def test_readonly_voice_reaches_backend_without_confirmation(text):
+    backend, gate, sender, submit = FakeBackend(), FakeGate(), FakeSender(), Collect()
+    bot, _ = build_bot(
+        backend=backend, gate=gate, sender=sender, submit=submit, recognizer=FakeRecognizer(text)
+    )
+    await bot.handle(VOICE)
+    await submit.drain()
+    assert not gate.voices
+    assert len(backend.requests) == 1
+    request = backend.requests[0]
+    assert request.text == text
+    assert request.reference_time == NOW
+    assert request.owner_id == "42" and request.chat_id == "777"
+    assert all(not buttons for buttons in sender.buttons)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Создай задачу купить хлеб",
+        "Создай встречу завтра в 10",
+        "Напомни завтра в 10 позвонить",
+        "Измени задачу отчёт",
+        "Перенеси встречу на 15:00",
+        "Измени напоминание на завтра",
+        "Удали задачу",
+        "Удали встречу",
+        "Удали напоминание",
+    ],
+)
+async def test_voice_writes_of_all_types_wait_for_confirmation(text):
+    backend, gate, sender, submit = FakeBackend(), FakeGate(), FakeSender(), Collect()
+    bot, _ = build_bot(
+        backend=backend, gate=gate, sender=sender, submit=submit, recognizer=FakeRecognizer(text)
+    )
+    await bot.handle(VOICE)
+    await submit.drain()
+    assert not backend.requests
+    assert gate.voices
+    assert sender.buttons[-1][0][0] == "Да, верно"
+
+
+@pytest.mark.parametrize("as_voice", [False, True])
+async def test_unrelated_input_reaches_neither_backend_nor_confirmation(as_voice):
+    text = "Что такое bogosort на Python?"
+    backend, gate, sender, submit = FakeBackend(), FakeGate(), FakeSender(), Collect()
+    bot, _ = build_bot(
+        backend=backend, gate=gate, sender=sender, submit=submit, recognizer=FakeRecognizer(text)
+    )
+    event = (
+        VOICE
+        if as_voice
+        else MessageCreated(message_id="off.1", chat_id="777", owner_id="42", text=text, audio=None)
+    )
+    await bot.handle(event)
+    await submit.drain()
+    assert not backend.requests
+    assert not gate.voices
+    assert sender.texts[-1] == OFF_TOPIC_REPLY
+
+
 START = BotStarted(event_id="max:bot_started:777:1", chat_id="777", owner_id="42")
 
 

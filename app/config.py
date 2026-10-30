@@ -3,7 +3,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     # usually fast, while waiting out a slow one costs the user 20+ seconds.
     llm_timeout_s: float = 12.0
     llm_max_retries: int = 1
+    llm_max_output_tokens: int = Field(default=1024, gt=0, le=8192)
     # Prices in rubles per 1000 tokens, used for cost analytics (p50 / p95).
     llm_price_input_rub_per_1k: float = 0.0
     llm_price_output_rub_per_1k: float = 0.0

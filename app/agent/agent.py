@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, cast
@@ -17,9 +18,18 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 
 from app.agent.history import ChatHistory, TurnState
 from app.agent.mcp import TOOLS, Caller, ToolGateway
+from app.agent.permissions import (
+    MUTATIONS,
+    OFF_TOPIC_REPLY,
+    allowed_mutations,
+    confirmation_reply,
+    off_topic,
+    short_clarification,
+)
 from app.agent.presentation import format_event_list
 from app.agent.time_input import has_explicit_time
 from app.agent.tools import model_tool_schemas
+from app.llm.arg_checks import annotate_result, check_args, normalize_args
 from app.llm.model import llm_session
 from app.llm.prompts import render_system_prompt, user_timezone
 from app.llm.speech import to_chat_text
@@ -140,9 +150,61 @@ class Assistant:
                 state = TurnState(
                     fingerprint, [HumanMessage(text)], has_explicit_time=has_explicit_time(text, context)
                 )
+                latest = await self.history.latest(user_id, chat_id)
+                pending = None if latest is None else latest.pending_change
+                if off_topic(text):
+                    state.messages.append(AIMessage(OFF_TOPIC_REPLY))
+                    state.complete = True
+                elif confirmation_reply(text):
+                    if (
+                        pending is not None
+                        and 0
+                        <= (moment - datetime.fromisoformat(pending["created_at"])).total_seconds()
+                        <= 900
+                    ):
+                        state.approved_change = pending
+                        state.messages.append(
+                            AIMessage(
+                                "",
+                                tool_calls=[
+                                    {
+                                        "name": pending["name"],
+                                        "args": pending["arguments"],
+                                        "id": "approved-" + operation_id,
+                                        "type": "tool_call",
+                                    }
+                                ],
+                            )
+                        )
+                    else:
+                        state.messages.append(
+                            AIMessage("Нет действующего изменения для подтверждения. Повторите запрос.")
+                        )
+                        state.complete = True
+                elif pending is not None and text.casefold().strip().rstrip(".! ") in {
+                    "нет",
+                    "отмена",
+                    "не надо",
+                }:
+                    state.messages.append(AIMessage("Изменение отменено."))
+                    state.complete = True
+                elif latest is not None and latest.clarification_operation and short_clarification(text):
+                    state.clarification_operation = latest.clarification_operation
                 await self.history.save_turn(user_id, chat_id, operation_id, state)
             elif state.fingerprint != fingerprint:
                 raise OperationConflictError("Turn was already used with different input or time context")
+            if not state.complete and state.approved_change is not None:
+                await self._pending(caller, chat_id, operation_id, state, moment)
+                call = _trace(state.messages)[-1]
+                if call.ok and call.result is not None:
+                    record = call.result.get("deleted", call.result.get("updated", {}))
+                    verb = "Удалено" if call.name == "delete_event" else "Изменено"
+                    answer_text = f"{verb}: {record.get('name', 'запись')}."
+                else:
+                    answer_text = "Изменение не выполнено. Перечитайте запись и повторите запрос."
+                state.messages.append(AIMessage(answer_text))
+                state.complete = True
+                await self.history.save_turn(user_id, chat_id, operation_id, state)
             if not state.complete:
                 context = await self.history.load(user_id, chat_id)
                 schemas = await self.mcp.list_tools(caller)
@@ -158,12 +220,21 @@ class Assistant:
                     if steps >= self.max_steps:
                         break
                     messages = [system, *context, *state.messages]
+                    # Bound the entire current prompt as well as historical turns.
+                    if (
+                        len(json.dumps([m.model_dump(mode="json") for m in messages], ensure_ascii=False))
+                        + len(json.dumps(schemas, ensure_ascii=False))
+                        > 48000
+                    ):
+                        state.messages.append(
+                            AIMessage("Слишком много данных для обработки. Уточните период или поиск.")
+                        )
+                        state.complete = True
+                        break
                     if state.retried:
-                        messages.append(
-                            SystemMessage(
-                                "Не подтверждай изменение без успешного результата инструмента. "
-                                "Если данных не хватает, задай конкретный уточняющий вопрос."
-                            )
+                        messages[0] = SystemMessage(
+                            system.text + "\nНе подтверждай изменение без успешного результата инструмента. "
+                            "Если данных не хватает, задай конкретный уточняющий вопрос."
                         )
                     with llm_session(user_id):
                         answer = await bound.ainvoke(messages)
@@ -192,10 +263,14 @@ class Assistant:
                         ):
                             raise ValueError("Invalid or excessive tool call batch")
                         # Persist the model's exact plan before any side effect.
+                        for proposed in answer.tool_calls:
+                            proposed["args"] = normalize_args(proposed["name"], proposed["args"])
                         state.messages.append(answer)
                         await self.history.save_turn(user_id, chat_id, operation_id, state)
                         continue
                     plain = to_chat_text(answer.text)
+                    if plain.rstrip().endswith("?") and "create_event" in allowed_mutations(text):
+                        state.clarification_operation = "create_event"
                     listing = self._list_answer(state, plain, moment, zone)
                     if listing is not None:
                         state.messages.append(AIMessage(listing))
@@ -273,14 +348,30 @@ class Assistant:
                     raise ValueError("Model tool call must have an ID")
                 if call_id in completed:
                     continue
-                arguments, name = call["args"], call["name"]
+                name = call["name"]
+                arguments = normalize_args(name, call["args"])
                 needs_time = (
                     name == "create_event"
                     and arguments.get("event_type") in ("reminder", "meeting")
                     and not state.has_explicit_time
                     and not has_explicit_time(state.messages[0].text)
                 )
-                action = str(uuid5(NAMESPACE_URL, json.dumps([caller.owner_id, chat, operation, ordinal])))
+                approved = state.approved_change
+                is_approved = (
+                    approved is not None and approved["name"] == name and approved["arguments"] == arguments
+                )
+                action = (
+                    approved["action_id"]
+                    if is_approved and approved is not None
+                    else str(uuid5(NAMESPACE_URL, json.dumps([caller.owner_id, chat, operation, ordinal])))
+                )
+                capabilities = allowed_mutations(state.messages[0].text)
+                permitted = (
+                    name not in MUTATIONS
+                    or name in capabilities
+                    or is_approved
+                    or (name == state.clarification_operation and short_clarification(state.messages[0].text))
+                )
                 previous = next(
                     (
                         c.result
@@ -289,7 +380,12 @@ class Assistant:
                     ),
                     None,
                 )
-                if name in {"update_event", "delete_event", "reschedule_meeting"} and previous is None:
+                if (
+                    permitted
+                    and not is_approved
+                    and name in {"update_event", "delete_event", "reschedule_meeting"}
+                    and previous is None
+                ):
                     choices = self._ambiguous_choices(state, arguments)
                     if choices:
                         question_field = "meeting_id" if name == "reschedule_meeting" else "event_id"
@@ -300,13 +396,22 @@ class Assistant:
                             if name == "delete_event"
                             else "\n\nКакую запись изменить?"
                         )
-                if needs_time or question is not None:
+                if not permitted:
+                    result: dict[str, Any] = {
+                        "error": {
+                            "code": "operation_not_authorized",
+                            "message": "Текущая реплика не разрешает это действие. Данные не изменены.",
+                            "field": None,
+                        }
+                    }
+                elif needs_time or question is not None:
+                    state.clarification_operation = name
                     question = question or (
                         "Во сколько напомнить?"
                         if arguments.get("event_type") == "reminder"
                         else "Во сколько начнётся встреча?"
                     )
-                    result: dict[str, Any] = {
+                    result = {
                         "error": {
                             "code": "validation_error",
                             "message": "Для выполнения действия нужно уточнение пользователя",
@@ -323,8 +428,69 @@ class Assistant:
                     }
                 elif previous is not None:
                     result = previous
+                elif name in {"update_event", "delete_event", "reschedule_meeting"} and not is_approved:
+                    state.pending_change = {
+                        "name": name,
+                        "arguments": arguments,
+                        "action_id": action,
+                        "created_at": reference_time.isoformat(),
+                    }
+                    label = {
+                        "delete_event": "Удалить",
+                        "update_event": "Изменить",
+                        "reschedule_meeting": "Перенести",
+                    }[name]
+                    target_id = arguments.get("event_id", arguments.get("meeting_id"))
+                    prior_messages = await self.history.load(caller.owner_id, chat)
+                    records = [
+                        event
+                        for c in _trace([*prior_messages, *state.messages])
+                        if c.ok and c.result
+                        for event in (
+                            c.result.get("events", [])
+                            + [c.result[key] for key in ("created", "updated", "deleted") if key in c.result]
+                        )
+                        if event.get("id") == target_id
+                    ]
+                    title = " ".join(str(records[-1]["name"]).split()) if records else str(target_id)
+                    fields = {k: v for k, v in arguments.items() if k not in {"event_id", "meeting_id"}}
+                    question = f"{label} «{title}»?"
+                    labels = {
+                        "name": "Название",
+                        "datetime": "Начало / срок",
+                        "date": "Дата",
+                        "end_time": "Окончание",
+                    }
+                    for key, value in fields.items():
+                        display = str(value)
+                        if key in {"datetime", "end_time"}:
+                            with suppress(ValueError):
+                                parsed = datetime.fromisoformat(display)
+                                if parsed.tzinfo is None:
+                                    raise ValueError("An explicit timezone is required")
+                                display = parsed.astimezone(user_timezone(caller.timezone)).strftime(
+                                    "%d.%m.%Y %H:%M"
+                                )
+                        question += f"\n{labels.get(key, key)}: {' '.join(display.split())}"
+                    question += "\nОтветьте «да» для подтверждения или «нет» для отмены (15 минут)."
+                    result = {"error": {"code": "confirmation_required", "message": question, "field": None}}
                 else:
-                    result = await self.mcp.call(caller, name, arguments, action_id=action)
+                    validation = (
+                        check_args(
+                            name,
+                            arguments,
+                            state.messages[0].text,
+                            reference_time,
+                            permitted_operations=frozenset({name}) if permitted else frozenset(),
+                        )
+                        if name == "create_event"
+                        else None
+                    )
+                    if validation:
+                        result = {"error": {"code": "validation_error", "message": validation, "field": None}}
+                    else:
+                        result = await self.mcp.call(caller, name, arguments, action_id=action)
+                        result = annotate_result(name, arguments, result)
                     if result.get("error", {}).get("code") == "temporary_unavailable":
                         raise TemporaryToolError("Tool storage is temporarily unavailable; retry this turn")
                 state.messages.append(
@@ -372,7 +538,17 @@ class Assistant:
         calls = _trace(state.messages)
         read_tools = {"get_events_by_period", "get_event_by_query"}
         # Searches used to choose a meeting for rescheduling must keep the model's question.
-        if not calls or plain.rstrip().endswith("?") or any(call.name not in read_tools for call in calls):
+        if (
+            not calls
+            or re.search(
+                r"^\s*(?:а\s+)?(?:(?:скажи|подскажи)\s*[, ]\s*)?"
+                r"(?:сколько\b|когда\b|во сколько\b|где\b|почему\b|зачем\b|как(?:ой|ая|ое)?\b)",
+                state.messages[0].text,
+                re.I,
+            )
+            or (plain.rstrip().endswith("?") and allowed_mutations(state.messages[0].text))
+            or any(call.name not in read_tools for call in calls)
+        ):
             return None
         if not calls[-1].ok:
             return None

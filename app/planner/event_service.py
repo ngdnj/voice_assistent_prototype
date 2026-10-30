@@ -53,8 +53,8 @@ class EventService:
         now = to_utc(self._clock())
         if not isinstance(previous, Task) and day is not None:
             raise ValueError("task_date is only supported for tasks")
-        if not isinstance(previous, Meeting) and end_time is not None:
-            raise ValueError("meeting_end is only supported for meetings")
+        if not isinstance(previous, Task | Meeting) and end_time is not None:
+            raise ValueError("record_end is only supported for tasks and meetings")
         record: EventRecord
         if isinstance(previous, Meeting):
             record = move_meeting(previous, starts_at=moment, ends_at=end_time)
@@ -69,11 +69,21 @@ class EventService:
             )
         else:
             change_due = day is not None or moment is not None
+            task_end = previous.ends_at
+            if day is not None:
+                if end_time is not None:
+                    raise ValueError("ends_at requires due_at, not a date-only deadline")
+                task_end = None
+            elif end_time is not None:
+                task_end = end_time
+            elif moment is not None and previous.ends_at is not None and previous.due_at is not None:
+                task_end = moment + (previous.ends_at - previous.due_at)
             record = replace(
                 previous,
                 title=name if name is not None else previous.title,
                 due_date=day if change_due else previous.due_date,
                 due_at=moment if change_due else previous.due_at,
+                ends_at=task_end,
             )
         return await self._repository.update(record, previous=previous, operation=operation, changed_at=now)
 

@@ -53,14 +53,33 @@ export async function fetchEvents(startTime: string, endTime: string): Promise<E
   return body.events as EventRecord[];
 }
 
-export async function updateTaskStatus(id: string, status: TaskStatus): Promise<void> {
+export async function updateTaskStatus(id: string, status: TaskStatus): Promise<EventRecord> {
   const headers = await authHeaders();
   const response = await fetch(`${API_BASE}/tasks/${encodeURIComponent(id)}/status`, {
     method: "PATCH",
     headers: { ...headers, "Content-Type": "application/json" },
     body: JSON.stringify({ status }),
   });
-  await readBody(response, "Не удалось изменить статус");
+  const body = await readBody(response, "Не удалось изменить статус");
+  return recordResult(body, "event", id);
+}
+
+function recordResult(body: Record<string, unknown>, field: string, id: string): EventRecord {
+  const record = body[field];
+  if (!record || typeof record !== "object" || !("id" in record) || record.id !== id) {
+    throw new Error("Сервер не подтвердил изменение записи");
+  }
+  return record as EventRecord;
+}
+
+export async function deleteEvent(id: string, operationId: string): Promise<EventRecord> {
+  const headers = await authHeaders();
+  const response = await fetch(`${API_BASE}/events/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: { ...headers, "X-Action-Id": operationId },
+  });
+  const body = await readBody(response, "Не удалось удалить запись");
+  return recordResult(body, "deleted", id);
 }
 
 export async function searchEvents(query: string, eventType: string): Promise<EventRecord[]> {

@@ -43,7 +43,7 @@ class PostgresTaskRepository(PostgresEventStore[Task]):
             "status": record.status,
             "due_date": record.due_date,
             "scheduled_at": record.due_at,
-            "ends_at": None,
+            "ends_at": record.ends_at,
             "created_at": record.created_at,
             "updated_at": record.created_at,
         }
@@ -57,6 +57,7 @@ class PostgresTaskRepository(PostgresEventStore[Task]):
             status=require(row, "status"),
             due_date=row["due_date"],
             due_at=row["scheduled_at"],
+            ends_at=row["ends_at"],
             created_at=row["created_at"],
         )
 
@@ -68,7 +69,12 @@ class PostgresTaskRepository(PostgresEventStore[Task]):
         exact: list[ColumnElement[bool]] = [events.c.scheduled_at.is_not(None)]
         dated: list[ColumnElement[bool]] = [events.c.due_date.is_not(None)]
         if query.start_time is not None:
-            exact.append(events.c.scheduled_at >= query.start_time)
+            exact.append(
+                or_(
+                    events.c.ends_at > query.start_time,
+                    and_(events.c.ends_at.is_(None), events.c.scheduled_at >= query.start_time),
+                )
+            )
             dated.append(events.c.due_date >= first_date)
         if query.end_time is not None:
             exact.append(events.c.scheduled_at < query.end_time)

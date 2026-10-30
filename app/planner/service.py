@@ -9,6 +9,7 @@ from app.planner.operation import CreationOperation
 from app.planner.query import RecordQuery
 from app.planner.repository import TaskRepository
 from app.planner.task import TASK_STATUSES, Task, TaskStatus, create_task, normalize_due
+from app.planner.time import to_utc
 
 
 class TaskService:
@@ -25,6 +26,7 @@ class TaskService:
         description: str = "",
         due_date: date | None = None,
         due_at: datetime | None = None,
+        ends_at: datetime | None = None,
     ) -> Task:
         """Validate and store a new task for a trusted owner."""
         due_date, due_at = normalize_due(due_date, due_at)
@@ -34,6 +36,11 @@ class TaskService:
             due["due_date"] = due_date.isoformat()
         if due_at is not None:
             due["due_at"] = due_at.isoformat()
+        if ends_at is not None:
+            ends_at = to_utc(ends_at)
+            if due_at is None or ends_at <= due_at:
+                raise ValueError("ends_at requires due_at and must be strictly after it")
+            due["ends_at"] = ends_at.isoformat()
         operation = CreationOperation.from_data(
             operation_id, title=title.strip(), **description_fingerprint_data(description), **due
         )
@@ -47,6 +54,7 @@ class TaskService:
             description=description,
             due_date=due_date,
             due_at=due_at,
+            ends_at=ends_at,
         )
         return await self._repository.add(task, operation=operation)
 

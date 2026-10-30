@@ -178,7 +178,33 @@ h1 {
   border-radius: 14px;
   padding: 16px;
   transition: border-color 0.15s;
+  flex: 1;
+  min-width: 0;
+  touch-action: pan-y;
+  -webkit-user-select: none;
+  user-select: none;
 }
+
+.event-row { display: flex; align-items: stretch; gap: 10px; }
+.event-delete {
+  flex: 0 0 44px;
+  align-self: center;
+  width: 44px;
+  height: 48px;
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  color: var(--app-error);
+  background: var(--app-surface);
+  border: 1px solid var(--app-error);
+  border-radius: 12px;
+  cursor: pointer;
+}
+.event-delete:disabled, .status-select:disabled { opacity: 0.6; cursor: wait; }
+.event-card:focus-visible, .event-delete:focus-visible { outline: 2px solid #4e7fff; outline-offset: 3px; }
+.event-row-revealed .event-card { border-color: var(--app-error); }
+.event-list-help { font-size: 12px; color: var(--app-muted); margin: -10px 0 12px; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 
 .event-card {
   box-shadow: 0 2px 8px var(--app-shadow);
@@ -211,6 +237,8 @@ h1 {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .event-name {

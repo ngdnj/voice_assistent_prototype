@@ -63,7 +63,11 @@ events = Table(
     CheckConstraint("due_date IS NULL OR event_type = 'task'", name="due_date_task_only"),
     CheckConstraint("due_date IS NULL OR scheduled_at IS NULL", name="due_date_xor_scheduled_at"),
     CheckConstraint("event_type = 'task' OR scheduled_at IS NOT NULL", name="scheduled_at_required"),
-    CheckConstraint("ends_at IS NULL OR (event_type = 'meeting' AND ends_at > scheduled_at)", name="ends_at"),
+    CheckConstraint(
+        "ends_at IS NULL OR (event_type IN ('task', 'meeting') "
+        "AND scheduled_at IS NOT NULL AND ends_at > scheduled_at)",
+        name="ends_at",
+    ),
     CheckConstraint("event_type <> 'reminder' OR scheduled_at >= created_at", name="reminder_not_in_past"),
 )
 

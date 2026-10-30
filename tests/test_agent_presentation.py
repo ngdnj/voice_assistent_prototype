@@ -162,6 +162,23 @@ async def test_search_for_an_ambiguous_reschedule_keeps_the_clarifying_question(
     assert reply.text == "Какую встречу перенести?"
 
 
+@pytest.mark.parametrize(
+    "question,answer",
+    [
+        ("Сколько длится встреча Хакатон?", "Встреча длится 2 часа."),
+        ("Во сколько начинается встреча Хакатон?", "Встреча начинается завтра в 10:00."),
+        ("Подскажи, сколько встреч завтра?", "Завтра одна встреча."),
+    ],
+)
+async def test_factual_question_keeps_answer_instead_of_replacing_it_with_list(question, answer):
+    gateway = ListingGateway([event(1, "Хакатон", 10, 120)])
+    model = ScriptedModel(responses=[tool("get_event_by_query", {"query": "Хакатон"}), AIMessage(answer)])
+    reply = await Assistant(model, gateway, InMemoryChatHistory()).handle(
+        "owner", question, reference_time=NOW, timezone=ZONE.key
+    )
+    assert reply.text == answer
+
+
 @pytest.mark.parametrize("name", ["update_event", "delete_event"])
 async def test_model_cannot_pick_an_arbitrary_record_from_ambiguous_search(name):
     gateway = ListingGateway([event(1, "Планёрка"), event(2, "Хакатон")])
@@ -176,7 +193,10 @@ async def test_model_cannot_pick_an_arbitrary_record_from_ambiguous_search(name)
         ]
     )
     reply = await Assistant(model, gateway, InMemoryChatHistory()).handle(
-        "owner", "Измени встречу", reference_time=NOW, timezone=ZONE.key
+        "owner",
+        "Удали встречу" if name == "delete_event" else "Измени встречу",
+        reference_time=NOW,
+        timezone=ZONE.key,
     )
     assert [call[1] for call in gateway.calls] == ["get_event_by_query"]
     assert "Планёрка" in reply.text and "Хакатон" in reply.text and reply.text.endswith("?")

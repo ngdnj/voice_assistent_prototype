@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import make_asgi_app
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.api.records import INIT_DATA_HEADER, build_records_router
+from app.api.records import ACTION_ID_HEADER, INIT_DATA_HEADER, build_records_router
 from app.mcp_server.server import build_mcp_server, header_context
 from app.mcp_server.tools import EventTools
 from app.planner.event_service import EventService
@@ -88,8 +88,8 @@ def build_app(tools: EventTools, settings: McpSettings) -> FastAPI:
             app.add_middleware(
                 CORSMiddleware,
                 allow_origins=list(settings.mini_app_origins),
-                allow_methods=["GET", "PATCH"],
-                allow_headers=[INIT_DATA_HEADER, "Content-Type"],
+                allow_methods=["GET", "PATCH", "DELETE"],
+                allow_headers=[INIT_DATA_HEADER, ACTION_ID_HEADER, "Content-Type"],
             )
     else:
         LOGGER.warning("mini_app_api_disabled", extra={"reason": "MAX_BOT_TOKEN is not set"})

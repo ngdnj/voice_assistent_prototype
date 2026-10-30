@@ -5,7 +5,7 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import uuid4
 
 from langchain_core.messages import BaseMessage, messages_from_dict, messages_to_dict
@@ -25,6 +25,9 @@ class TurnState:
     retried: bool = False
     complete: bool = False
     has_explicit_time: bool = False
+    pending_change: dict[str, Any] | None = None
+    approved_change: dict[str, Any] | None = None
+    clarification_operation: str | None = None
 
     def encode(self) -> str:
         return json.dumps(
@@ -36,6 +39,9 @@ class TurnState:
                 "retried": self.retried,
                 "complete": self.complete,
                 "has_explicit_time": self.has_explicit_time,
+                "pending_change": self.pending_change,
+                "approved_change": self.approved_change,
+                "clarification_operation": self.clarification_operation,
             },
             ensure_ascii=False,
         )
@@ -51,6 +57,9 @@ class TurnState:
             retried=value["retried"],
             complete=value["complete"],
             has_explicit_time=value.get("has_explicit_time", False),
+            pending_change=value.get("pending_change"),
+            approved_change=value.get("approved_change"),
+            clarification_operation=value.get("clarification_operation"),
         )
 
 
@@ -60,6 +69,7 @@ class ChatHistory(Protocol):
     async def get_turn(self, owner: str, chat: str, operation: str) -> TurnState | None: ...
     async def save_turn(self, owner: str, chat: str, operation: str, state: TurnState) -> None: ...
     async def reset(self, owner: str, chat: str) -> None: ...
+    async def latest(self, owner: str, chat: str) -> TurnState | None: ...
 
 
 class InMemoryChatHistory:
@@ -99,6 +109,10 @@ class InMemoryChatHistory:
 
     async def reset(self, owner: str, chat: str) -> None:
         self._completed.pop((owner, chat), None)
+
+    async def latest(self, owner: str, chat: str) -> TurnState | None:
+        completed = self._completed.get((owner, chat), [])
+        return None if not completed else await self.get_turn(owner, chat, completed[-1])
 
 
 def _within_budget(raw_turns: list[str], max_tokens: int) -> list[BaseMessage]:
@@ -167,3 +181,7 @@ class RedisChatHistory:
 
     async def reset(self, owner: str, chat: str) -> None:
         await self.client.delete(self._key(owner, chat) + ":history")
+
+    async def latest(self, owner: str, chat: str) -> TurnState | None:
+        values = await self.client.lrange(self._key(owner, chat) + ":history", 0, 0)
+        return None if not values else TurnState.decode(str(values[0]))

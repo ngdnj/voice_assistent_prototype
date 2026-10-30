@@ -122,11 +122,11 @@ def _period(start: Any, end: Any, *, required: bool) -> tuple[datetime | None, d
 # Planner messages are English; the agent gets a short Russian explanation and the argument name.
 _PLANNER_FIELDS = (
     ("task_date", "date", "Дата без времени допустима только у задачи"),
-    ("meeting_end", "end_time", "Окончание можно менять только у встречи"),
+    ("record_end", "end_time", "Окончание можно менять только у задачи или встречи"),
     ("description", "description", "Описание длиннее 2000 символов"),
     ("title", "name", "Название не может быть пустым и длиннее 200 символов"),
     ("text", "name", "Название не может быть пустым и длиннее 200 символов"),
-    ("ends_at", "end_time", "Окончание встречи должно быть позже начала"),
+    ("ends_at", "end_time", "Для конца интервала нужно точное начало; окончание должно быть позже начала"),
     ("due", "date", "Укажите либо date, либо datetime"),
 )
 
@@ -252,8 +252,8 @@ class EventTools:
             end_time = _moment(arguments.get("end_time"), "end_time")
             if event_type != "task" and due_date is not None:
                 raise ArgumentError("Дата без времени допустима только у задачи; укажите datetime", "date")
-            if event_type != "meeting" and end_time is not None:
-                raise ArgumentError("end_time допустимо только у встречи", "end_time")
+            if event_type == "reminder" and end_time is not None:
+                raise ArgumentError("end_time допустимо только у задачи или встречи", "end_time")
             if due_date is not None and moment is not None:
                 raise ArgumentError("Укажите либо date, либо datetime", "date")
         except ArgumentError as exc:
@@ -262,7 +262,9 @@ class EventTools:
         try:
             record: Any
             if event_type == "task":
-                record = await self.tasks.create_task(title=name, due_date=due_date, due_at=moment, **common)
+                record = await self.tasks.create_task(
+                    title=name, due_date=due_date, due_at=moment, ends_at=end_time, **common
+                )
             elif event_type == "meeting":
                 assert moment is not None
                 record = await self.meetings.create_meeting(

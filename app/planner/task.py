@@ -32,6 +32,8 @@ class Task:
     # Date-only deadline stays a date: no midnight is substituted for a missing time.
     due_date: date | None = None
     due_at: datetime | None = None
+    # With an end, due_at is the explicit start of a task's working interval.
+    ends_at: datetime | None = None
     id: UUID = field(default_factory=uuid4)
     # Restoring from storage may pass any allowed status; new tasks start as "todo".
     status: TaskStatus = "todo"
@@ -47,7 +49,12 @@ class Task:
         object.__setattr__(self, "title", title)
         object.__setattr__(self, "description", normalize_description(self.description))
         object.__setattr__(self, "created_at", to_utc(self.created_at))
-        object.__setattr__(self, "due_at", normalize_due(self.due_date, self.due_at)[1])
+        start = normalize_due(self.due_date, self.due_at)[1]
+        end = None if self.ends_at is None else to_utc(self.ends_at)
+        if end is not None and (start is None or end <= start):
+            raise ValueError("ends_at requires due_at and must be strictly after it")
+        object.__setattr__(self, "due_at", start)
+        object.__setattr__(self, "ends_at", end)
 
 
 def create_task(
@@ -58,6 +65,7 @@ def create_task(
     description: str = "",
     due_date: date | None = None,
     due_at: datetime | None = None,
+    ends_at: datetime | None = None,
 ) -> Task:
     """Create a task in memory using explicit time and a trusted owner ID."""
     check_name_length(title, "title")
@@ -68,4 +76,5 @@ def create_task(
         description=description,
         due_date=due_date,
         due_at=due_at,
+        ends_at=ends_at,
     )

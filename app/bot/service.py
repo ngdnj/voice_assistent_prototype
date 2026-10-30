@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Literal, Protocol
 from uuid import UUID, uuid4
 
+from app.agent.permissions import OFF_TOPIC_REPLY, off_topic, voice_requires_confirmation
 from app.asr.audio import AudioDecodeError
 from app.asr.base import AsrError, AudioTooLongError, SpeechRecognizer
 from app.bot import messages, metrics
@@ -430,10 +431,13 @@ class BotService:
             recognized, outcome = await self._recognize(incoming)
             if recognized is None:
                 return outcome
-            # The user confirms the transcript first; the backend gets it after "Да, верно".
-            return await self._ask_confirmation(incoming, recognized), "awaiting_confirmation"
+            if voice_requires_confirmation(recognized):
+                return await self._ask_confirmation(incoming, recognized), "awaiting_confirmation"
+            text = recognized
         if text is None:
             raise ValueError("Message has no text to process")
+        if off_topic(text):
+            return OFF_TOPIC_REPLY, "replied"
         reply = await self._backend.answer(
             BackendRequest(
                 request_id=incoming.request_id,

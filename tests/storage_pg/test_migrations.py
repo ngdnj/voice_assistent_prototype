@@ -141,6 +141,7 @@ class MigrationIntegrationTests(unittest.TestCase):
             event_row(),
             event_row(status="in_progress", due_date=date(2026, 10, 24)),
             event_row(status="done", scheduled_at=CREATED + timedelta(days=1)),
+            event_row(scheduled_at=CREATED, ends_at=CREATED + timedelta(hours=1)),
             event_row(**MEETING),
             event_row(**MEETING, ends_at=CREATED + timedelta(hours=2)),
             event_row(**{**REMINDER, "scheduled_at": CREATED}),
@@ -180,7 +181,9 @@ class MigrationIntegrationTests(unittest.TestCase):
             "reminder without moment": event_row(**{**REMINDER, "scheduled_at": None}),
             "end before start": event_row(**MEETING, ends_at=CREATED),
             "end equals start": event_row(**MEETING, ends_at=MEETING["scheduled_at"]),
-            "task with end": event_row(scheduled_at=CREATED, ends_at=CREATED + timedelta(hours=1)),
+            "task end without start": event_row(ends_at=CREATED + timedelta(hours=1)),
+            "task end equals start": event_row(scheduled_at=CREATED, ends_at=CREATED),
+            "reminder with end": event_row(**REMINDER, ends_at=CREATED + timedelta(hours=2)),
             "reminder in the past": event_row(**{**REMINDER, "scheduled_at": CREATED - timedelta(seconds=1)}),
         }
 

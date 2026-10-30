@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
 import pytest
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 
 from app.agent.agent import Assistant, TemporaryToolError
 from app.agent.history import ConversationBusyError, InMemoryChatHistory
@@ -64,6 +64,9 @@ async def test_tool_result_drives_answer_and_operation_replay():
     repeated = await agent.handle("owner", "Создай задачу", operation_id="turn-1", **TIME)
     assert repeated.text == reply.text
     assert len(model.seen) == 2
+    for prompt in model.seen:
+        assert isinstance(prompt[0], SystemMessage)
+        assert not any(isinstance(message, SystemMessage) for message in prompt[1:])
     with pytest.raises(OperationConflictError):
         await agent.handle("owner", "Другие данные", operation_id="turn-1", **TIME)
 
@@ -159,11 +162,20 @@ async def test_reschedule_uses_stable_action_and_accepts_confirmed_update():
     reply = await agent.handle(
         "owner", "Перенеси встречу на завтра в три часа дня", operation_id="move", **TIME
     )
-    assert reply.tool_calls[0].ok and not reply.retried
+    assert gateway.calls == []
+    proposal = await history.get_turn("owner", "private", "move")
+    assert proposal is not None and proposal.pending_change is not None
+    assert proposal.pending_change["arguments"] == args
+    confirmed = await agent.handle("owner", "да", operation_id="confirm-move", **TIME)
+    assert confirmed.tool_calls[0].ok and not confirmed.retried
+    assert gateway.calls[0][1:] == ("reschedule_meeting", args, proposal.pending_change["action_id"])
+    assert len(model.seen) == 1
     again = await agent.handle(
         "owner", "Перенеси встречу на завтра в три часа дня", operation_id="move", **TIME
     )
     assert again.text == reply.text and len(gateway.calls) == 1
+    replayed_confirmation = await agent.handle("owner", "да", operation_id="confirm-move", **TIME)
+    assert replayed_confirmation.text == confirmed.text and len(gateway.calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -185,10 +197,24 @@ async def test_edit_and_delete_are_confirmed_only_after_their_result(name, answe
     args = {"event_id": "57a58c04-2591-4547-b16b-47bb263be833"}
     if name == "update_event":
         args["name"] = "Новое название"
-    model = ScriptedModel(responses=[tool(name, args), tool(name, args, call_id="repeat"), AIMessage(answer)])
-    reply = await Assistant(model, gateway, InMemoryChatHistory()).handle("owner", "Измени запись", **TIME)
-    assert reply.text == answer and not reply.retried
+    first, duplicate = tool(name, args), tool(name, args, call_id="repeat")
+    model = ScriptedModel(
+        responses=[AIMessage("", tool_calls=[*first.tool_calls, *duplicate.tool_calls]), AIMessage(answer)]
+    )
+    history = InMemoryChatHistory()
+    agent = Assistant(model, gateway, history)
+    request = "Удали запись" if name == "delete_event" else "Измени запись"
+    await agent.handle("owner", request, operation_id="prepare", **TIME)
+    assert gateway.calls == []
+    pending = await history.get_turn("owner", "private", "prepare")
+    assert pending is not None and pending.pending_change is not None
+    reply = await agent.handle("owner", "да", operation_id="confirm", **TIME)
+    assert reply.tool_calls[0].ok and not reply.retried
+    assert gateway.calls[0][1:] == (name, args, pending.pending_change["action_id"])
     assert len(gateway.calls) == 1
+    assert len(model.seen) == 1
+    replay = await agent.handle("owner", "да", operation_id="confirm", **TIME)
+    assert replay.text == reply.text and len(gateway.calls) == 1
 
 
 @pytest.mark.parametrize("text", ["Переименовал встречу.", "Запись удалена.", "Отменил встречу."])
@@ -198,15 +224,19 @@ async def test_invented_rename_or_deletion_is_rejected(text):
     assert reply.retried and "не подтверждено" in reply.text
 
 
-async def test_step_limit_after_deletion_reports_completed_action_without_claiming_a_saved_record():
+async def test_step_limit_cannot_execute_deletion_without_confirmation():
     model = ScriptedModel(
         responses=[tool("delete_event", {"event_id": "57a58c04-2591-4547-b16b-47bb263be833"})]
     )
-    reply = await Assistant(model, Gateway(), InMemoryChatHistory(), max_steps=1).handle(
-        "owner", "Удали запись", **TIME
-    )
-    assert reply.tool_calls[0].ok
-    assert reply.text.startswith("Действие выполнено") and "сохранена" not in reply.text
+    gateway, history = Gateway(), InMemoryChatHistory()
+    agent = Assistant(model, gateway, history, max_steps=1)
+    reply = await agent.handle("owner", "Удали запись", operation_id="prepare", **TIME)
+    assert gateway.calls == []
+    assert not any(call.ok for call in reply.tool_calls)
+    confirmed = await agent.handle("owner", "да", operation_id="confirm", **TIME)
+    assert confirmed.tool_calls[0].ok
+    assert confirmed.text.startswith("Удалено") and "сохранена" not in confirmed.text
+    assert len(gateway.calls) == 1
 
 
 async def test_model_cannot_choose_owner_or_call_unapproved_tools():
@@ -229,6 +259,10 @@ async def test_unconfirmed_success_is_retried_once_then_replaced():
     assert reply.retried
     assert "не подтверждено" in reply.text
     assert len(model.seen) == 2
+    for prompt in model.seen:
+        assert isinstance(prompt[0], SystemMessage)
+        assert not any(isinstance(message, SystemMessage) for message in prompt[1:])
+    assert "Не подтверждай изменение" in model.seen[-1][0].text
 
 
 async def test_clarification_question_is_not_mistaken_for_confirmation():

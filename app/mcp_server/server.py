@@ -40,6 +40,13 @@ EventTypesArg = Annotated[
 MomentArg = Annotated[
     str | None, Field(description="ISO 8601 с UTC или смещением, например 2026-10-24T15:00:00+03:00")
 ]
+RangeEndArg = Annotated[
+    str | None,
+    Field(
+        description="Явно указанное окончание интервала задачи или встречи, "
+        "ISO 8601 со смещением; позже datetime"
+    ),
+]
 SortArg = Annotated[
     str | None,
     Field(
@@ -106,6 +113,7 @@ def build_mcp_server(tools: EventTools, context: ContextProvider) -> FastMCP:
         description=(
             "Создать задачу, встречу или напоминание. "
             "Задача: datetime или date (срок) необязательны, не вместе. "
+            "Задача с интервалом: datetime — начало, end_time — явно названное окончание. "
             "Встреча: обязательно datetime начала, end_time — только если пользователь назвал окончание "
             "(длительность не придумывай). Напоминание: обязательно datetime. Если времени нет — уточни у "
             'пользователя, а не вызывай инструмент. Результат: {"created": запись} или {"error": ...}.'
@@ -117,7 +125,7 @@ def build_mcp_server(tools: EventTools, context: ContextProvider) -> FastMCP:
         description: Annotated[str | None, Field(description="Подробности, до 2000 символов")] = None,
         date: Annotated[str | None, Field(description="Срок задачи без времени, YYYY-MM-DD")] = None,
         datetime: MomentArg = None,
-        end_time: MomentArg = None,
+        end_time: RangeEndArg = None,
     ) -> dict[str, Any]:
         return await run(
             "create_event",
@@ -138,7 +146,8 @@ def build_mcp_server(tools: EventTools, context: ContextProvider) -> FastMCP:
         description=(
             "Записи пользователя за период [start_time, end_time), до 366 дней, не больше 100 записей "
             "(truncated=true — есть ещё). Задачи выбираются по сроку; задачи без срока сюда не входят. "
-            'Встречи — по началу, напоминания — по времени. Пустой период — {"events": []}.'
+            "Интервалы задач и встреч — по пересечению с периодом, без конца — по началу. "
+            'Напоминания — по времени. Пустой период — {"events": []}.'
         )
     )
     async def get_events_by_period(
@@ -228,7 +237,8 @@ def build_mcp_server(tools: EventTools, context: ContextProvider) -> FastMCP:
             "Сначала найди запись поиском или в истории; при нескольких совпадениях уточни выбор. "
             "Не создаёт новую запись. name — новое название; datetime — новое начало встречи/время "
             "напоминания/срок задачи; date — только дата задачи, не вместе с datetime; end_time — "
-            "только окончание встречи. Новое начало сохраняет известную длительность при пропуске end_time. "
+            "окончание задачи или встречи. Новое начало сохраняет известную длительность "
+            "при пропуске end_time. "
             'Нужно хотя бы одно изменение. Успех: {"updated": запись}, ошибка: {"error": ...}.'
         )
     )
@@ -237,7 +247,7 @@ def build_mcp_server(tools: EventTools, context: ContextProvider) -> FastMCP:
         name: Annotated[str | None, Field(description="Новое название, 1–200 символов")] = None,
         datetime: MomentArg = None,
         date: Annotated[str | None, Field(description="Новый срок задачи без времени, YYYY-MM-DD")] = None,
-        end_time: MomentArg = None,
+        end_time: RangeEndArg = None,
     ) -> dict[str, Any]:
         return await run(
             "update_event",

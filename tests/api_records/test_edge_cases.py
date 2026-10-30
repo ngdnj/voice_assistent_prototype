@@ -8,7 +8,7 @@ import httpx
 from fastapi import FastAPI
 
 from app.api.init_data import InvalidInitDataError, verify_init_data
-from app.api.records import INIT_DATA_HEADER, build_records_router
+from app.api.records import ACTION_ID_HEADER, INIT_DATA_HEADER, build_records_router
 from app.mcp_server.tools import EventTools
 from tests.api_records import BOT_TOKEN, signed_init_data
 
@@ -78,3 +78,31 @@ class RestOrderingEdgeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.status_code, 422)
         self.assertEqual(response.json()["error"]["field"], "limit")
+
+    async def test_delete_authentication_precedes_action_and_path_validation(self) -> None:
+        response = await self.client.request(
+            "DELETE",
+            "/api/events/not-a-uuid",
+            content=b"{bad",
+            headers={ACTION_ID_HEADER: "not-a-uuid", "content-type": "application/json"},
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["error"]["code"], "unauthorized")
+
+    async def test_delete_requires_a_uuid_action_header(self) -> None:
+        auth = {INIT_DATA_HEADER: signed_init_data(auth_date=NOW)}
+        for value in (None, "", "   ", "not-a-uuid", "x" * 201):
+            with self.subTest(action_id=value):
+                headers = auth if value is None else {**auth, ACTION_ID_HEADER: value}
+                response = await self.client.delete(f"/api/events/{uuid4()}", headers=headers)
+                self.assertEqual(response.status_code, 422)
+                self.assertEqual(response.json()["error"]["code"], "validation_error")
+                self.assertEqual(response.json()["error"]["field"], ACTION_ID_HEADER)
+
+    async def test_delete_malformed_record_id_is_not_found(self) -> None:
+        response = await self.client.delete(
+            "/api/events/not-a-uuid",
+            headers={INIT_DATA_HEADER: signed_init_data(auth_date=NOW), ACTION_ID_HEADER: str(uuid4())},
+        )
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")

@@ -45,7 +45,7 @@ class EventDTO(BaseModel):
                 status=record.status,
                 date=record.due_date,
                 datetime=record.due_at,
-                end_time=None,
+                end_time=record.ends_at,
                 created_at=record.created_at,
             )
         if isinstance(record, Meeting):

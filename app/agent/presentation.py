@@ -65,7 +65,7 @@ def _when(event: EventDTO, today: date, zone: ZoneInfo) -> str:
         return "Без срока" if event.date is None else f"{_day(event.date, today)}, без времени"
     start = event.datetime.astimezone(zone)
     value = f"{_day(start.date(), today)}, {start:%H:%M}"
-    if event.event_type == "meeting" and event.end_time is not None:
+    if event.event_type in {"meeting", "task"} and event.end_time is not None:
         end = event.end_time.astimezone(zone)
         if end.date() == start.date():
             value += f"–{end:%H:%M}"

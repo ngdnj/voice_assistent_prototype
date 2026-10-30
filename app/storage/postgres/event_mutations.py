@@ -187,7 +187,7 @@ class PostgresEventMutations:
                         "name": record.title,
                         "due_date": record.due_date,
                         "scheduled_at": record.due_at,
-                        "ends_at": None,
+                        "ends_at": record.ends_at,
                     }
                 elif isinstance(record, Meeting):
                     values = {

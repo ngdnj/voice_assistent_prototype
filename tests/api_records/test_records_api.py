@@ -1,17 +1,18 @@
 import unittest
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import httpx
 from fastapi import FastAPI
 from sqlalchemy import delete
 
-from app.api.records import INIT_DATA_HEADER, build_records_router
+from app.api.records import ACTION_ID_HEADER, INIT_DATA_HEADER, build_records_router
 from app.mcp_server.__main__ import McpSettings, build_app, build_tools
 from app.mcp_server.context import TrustedContext
 from app.mcp_server.tools import EventTools
+from app.planner.event_repository import EventMutationStorageError
 from app.storage.postgres.engine import postgres_engine, session_factory
 from app.storage.postgres.tables import events, operations
 from tests.api_records import BOT_TOKEN, signed_init_data
@@ -31,6 +32,30 @@ class DisabledApiTests(unittest.IsolatedAsyncioTestCase):
         app = build_app(EventTools(None, None, None, None), settings)  # type: ignore[arg-type]
         paths = {getattr(route, "path", "") for route in app.routes}
         self.assertFalse(any(path.startswith("/api") for path in paths))
+
+    async def test_cors_allows_authenticated_delete_headers(self) -> None:
+        app = build_app(
+            EventTools(None, None, None, None),  # type: ignore[arg-type]
+            McpSettings(
+                service_token="t" * 32,
+                bot_token=BOT_TOKEN,
+                mini_app_origins=("https://app.example.org",),
+            ),
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.options(
+                "/api/events/some-id",
+                headers={
+                    "Origin": "https://app.example.org",
+                    "Access-Control-Request-Method": "DELETE",
+                    "Access-Control-Request-Headers": "X-Max-Init-Data, X-Action-Id",
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("DELETE", response.headers["access-control-allow-methods"])
+        self.assertIn("x-action-id", response.headers["access-control-allow-headers"].lower())
 
 
 @requires_postgres
@@ -95,6 +120,7 @@ class RecordsApiTests(unittest.IsolatedAsyncioTestCase):
                     await self.client.get("/api/events", headers=headers),
                     await self.client.get("/api/events/search", headers=headers),
                     await self.client.patch(f"/api/tasks/{uuid4()}/status", headers=headers),
+                    await self.client.delete(f"/api/events/{uuid4()}", headers=headers),
                 ):
                     self.assertEqual(response.status_code, 401)
                     self.assertEqual(response.json()["error"]["code"], "unauthorized")
@@ -142,6 +168,72 @@ class RecordsApiTests(unittest.IsolatedAsyncioTestCase):
             f"/api/tasks/{created['id']}/status", json={"status": "done"}, headers=self.headers()
         )
         self.assertEqual(response.status_code, 404)
+
+    async def test_delete_all_types_and_replay_are_persisted(self) -> None:
+        inputs = (
+            {"event_type": "task", "name": "Удалить задачу", "date": "2026-10-24"},
+            {"event_type": "meeting", "name": "Удалить встречу", "datetime": "2026-10-24T10:00:00+03:00"},
+            {
+                "event_type": "reminder",
+                "name": "Удалить напоминание",
+                "datetime": "2026-10-24T12:00:00+03:00",
+            },
+        )
+        for arguments in inputs:
+            with self.subTest(kind=arguments["event_type"]):
+                record = await self.create(**arguments)
+                headers = {**self.headers(), ACTION_ID_HEADER: str(uuid4())}
+                path = f"/api/events/{record['id']}"
+                first = await self.client.delete(path, headers=headers)
+                self.assertEqual(first.status_code, 200)
+                self.assertEqual(first.json()["deleted"], record)
+                repeated = await self.client.delete(path, headers=headers)
+                self.assertEqual(repeated.status_code, 200)
+                self.assertEqual(repeated.json(), first.json())
+                # A genuinely new attempt sees no accessible record, while replay still works.
+                new_attempt = await self.client.delete(
+                    path, headers={**self.headers(), ACTION_ID_HEADER: str(uuid4())}
+                )
+                self.assertEqual(new_attempt.status_code, 404)
+        listed = await self.client.get("/api/events", params=DAY, headers=self.headers())
+        self.assertEqual(listed.json()["events"], [])
+
+    async def test_delete_owner_and_action_conflicts_do_not_change_other_records(self) -> None:
+        first = await self.create(event_type="task", name="Первая задача", date="2026-10-24")
+        second = await self.create(event_type="task", name="Вторая задача", date="2026-10-24")
+        foreign = await self.client.request(
+            "DELETE",
+            f"/api/events/{first['id']}",
+            headers={**self.headers(self.other_id), ACTION_ID_HEADER: str(uuid4())},
+            json={"owner_id": str(self.user_id)},
+        )
+        self.assertEqual(foreign.status_code, 404)
+        action = str(uuid4())
+        headers = {**self.headers(), ACTION_ID_HEADER: action}
+        self.assertEqual(
+            (await self.client.delete(f"/api/events/{first['id']}", headers=headers)).status_code, 200
+        )
+        conflict = await self.client.delete(f"/api/events/{second['id']}", headers=headers)
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.json()["error"]["code"], "operation_conflict")
+        remaining = await self.client.get("/api/events", params=DAY, headers=self.headers())
+        self.assertEqual([event["id"] for event in remaining.json()["events"]], [second["id"]])
+
+    async def test_delete_storage_error_is_not_acknowledged_as_success(self) -> None:
+        record = await self.create(event_type="task", name="Сохранить до успешного удаления")
+        headers = {**self.headers(), ACTION_ID_HEADER: str(uuid4())}
+        path = f"/api/events/{record['id']}"
+        with patch.object(
+            type(self.tools.editor),
+            "delete_event",
+            AsyncMock(side_effect=EventMutationStorageError("private infrastructure detail")),
+        ):
+            response = await self.client.delete(path, headers=headers)
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["error"]["code"], "temporary_unavailable")
+        self.assertNotIn("private infrastructure", response.text)
+        retry = await self.client.delete(path, headers=headers)
+        self.assertEqual(retry.status_code, 200)
 
     async def test_status_change_is_persisted(self) -> None:
         task = await self.create(event_type="task", name="Сдать отчёт", date="2026-10-24")

@@ -56,6 +56,8 @@ class RedisTaskRepository:
             data["due_date"] = task.due_date.isoformat()
         if task.due_at is not None:
             data["due_at"] = task.due_at.isoformat()
+        if task.ends_at is not None:
+            data["ends_at"] = task.ends_at.isoformat()
         return json.dumps(data, ensure_ascii=False)
 
     async def add(self, task: Task, *, operation: CreationOperation | None = None) -> Task:
@@ -126,7 +128,7 @@ class RedisTaskRepository:
         try:
             data = json.loads(payload)
             # Records written before "description" existed have no such field; deadlines are optional.
-            if not isinstance(data, dict) or set(data) - {"description", "due_date", "due_at"} != {
+            if not isinstance(data, dict) or set(data) - {"description", "due_date", "due_at", "ends_at"} != {
                 "id", "owner_id", "title", "status", "created_at"
             }:
                 raise ValueError("Invalid fields")
@@ -140,12 +142,15 @@ class RedisTaskRepository:
             created_at = datetime.fromisoformat(data["created_at"])
             due_date = date.fromisoformat(data["due_date"]) if "due_date" in data else None
             due_at = datetime.fromisoformat(data["due_at"]) if "due_at" in data else None
+            ends_at = datetime.fromisoformat(data["ends_at"]) if "ends_at" in data else None
             if created_at.utcoffset() != timedelta(0) or (
                 due_at is not None and due_at.utcoffset() != timedelta(0)
             ):
                 raise ValueError("Expected UTC timestamp")
             if due_date is not None and due_date.isoformat() != data["due_date"]:
                 raise ValueError("Expected ISO date")
+            if ends_at is not None and ends_at.utcoffset() != timedelta(0):
+                raise ValueError("Expected UTC timestamp")
             task = Task(
                 id=stored_id,
                 owner_id=data["owner_id"],
@@ -155,6 +160,7 @@ class RedisTaskRepository:
                 created_at=created_at,
                 due_date=due_date,
                 due_at=due_at,
+                ends_at=ends_at,
             )
             if task.title != data["title"] or task.description != data.get("description", ""):
                 raise ValueError("Expected normalized title and description")

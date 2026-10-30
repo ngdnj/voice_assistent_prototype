@@ -1,10 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import "./App.css";
 import { Tabs } from "./Tabs";
 import { EventList } from "./EventList";
 import { ThemeToggle } from "./ThemeToggle";
 import { applyTheme, type Theme } from "./theme";
-import { fetchEvents, searchEvents, UnauthorizedError, updateTaskStatus } from "./api";
+import { deleteEvent, fetchEvents, searchEvents, UnauthorizedError, updateTaskStatus } from "./api";
 import type { EventRecord, EventType, TaskStatus } from "./types";
 
 type Status = "loading" | "error" | "unauthorized" | "ready";
@@ -33,12 +33,19 @@ function App({ initialTheme }: { initialTheme: Theme }) {
     return localDate(d);
   });
   const [query, setQuery] = useState("");
+  const [mutationError, setMutationError] = useState<string | null>(null);
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
+  const [updatingIds, setUpdatingIds] = useState<Set<string>>(new Set());
+  const deletedIds = useRef(new Set<string>());
+  const deleting = useRef(new Set<string>());
+  const updating = useRef(new Set<string>());
+  // A retry after an uncertain network result must refer to the same logical deletion.
+  const deleteOperations = useRef(new Map<string, string>());
 
   useEffect(() => {
     let cancelled = false;
-    setStatus("loading");
 
-    // Поиск по смыслу (query) не привязан к периоду — он должен находить
+    // Поиск по словам (query) не привязан к периоду — он должен находить
     // даже задачи без срока. Если строка поиска пустая — обычная загрузка по периоду.
     const trimmed = query.trim();
     const load = () => {
@@ -57,7 +64,8 @@ function App({ initialTheme }: { initialTheme: Theme }) {
         .then(load)
         .then((data) => {
           if (!cancelled) {
-            setEvents(data);
+            // An older in-flight GET must not resurrect a successfully deleted record.
+            setEvents(data.filter((event) => !deletedIds.current.has(event.id)));
             setStatus("ready");
           }
         })
@@ -83,14 +91,42 @@ function App({ initialTheme }: { initialTheme: Theme }) {
   }
 
   async function handleStatusChange(id: string, newStatus: TaskStatus) {
-    const previous = events;
-    setEvents((prev) =>
-      prev.map((event) => (event.id === id ? { ...event, status: newStatus } : event))
-    );
+    if (deleting.current.has(id) || updating.current.has(id) || deletedIds.current.has(id)) return;
+    updating.current.add(id);
+    setUpdatingIds(new Set(updating.current));
+    setMutationError(null);
     try {
-      await updateTaskStatus(id, newStatus);
-    } catch {
-      setEvents(previous);
+      const changed = await updateTaskStatus(id, newStatus);
+      setEvents((current) => current.map((event) => event.id === id ? changed : event));
+    } catch (error: unknown) {
+      if (error instanceof UnauthorizedError) setStatus("unauthorized");
+      else setMutationError("Не удалось изменить статус. Попробуйте ещё раз.");
+    } finally {
+      updating.current.delete(id);
+      setUpdatingIds(new Set(updating.current));
+    }
+  }
+
+  async function handleDelete(id: string) {
+    if (deleting.current.has(id) || updating.current.has(id) || deletedIds.current.has(id)) return;
+    deleting.current.add(id);
+    setDeletingIds(new Set(deleting.current));
+    setMutationError(null);
+    try {
+      let operationId = deleteOperations.current.get(id);
+      if (!operationId) {
+        operationId = crypto.randomUUID();
+        deleteOperations.current.set(id, operationId);
+      }
+      await deleteEvent(id, operationId);
+      deletedIds.current.add(id);
+      setEvents((current) => current.filter((event) => event.id !== id));
+    } catch (error: unknown) {
+      if (error instanceof UnauthorizedError) setStatus("unauthorized");
+      else setMutationError("Не удалось удалить запись. Повторите попытку.");
+    } finally {
+      deleting.current.delete(id);
+      setDeletingIds(new Set(deleting.current));
     }
   }
 
@@ -104,18 +140,40 @@ function App({ initialTheme }: { initialTheme: Theme }) {
         type="text"
         placeholder="Найти запись…"
         value={query}
-        onChange={(e) => setQuery(e.target.value)}
+        onChange={(e) => {
+          if (e.target.value !== query) {
+            setStatus("loading");
+            setQuery(e.target.value);
+          }
+        }}
       />
 
       {!query.trim() && (
         <div className="period">
-          <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
+          <input type="date" value={from} onChange={(e) => {
+            if (e.target.value !== from) {
+              setStatus("loading");
+              setFrom(e.target.value);
+            }
+          }} />
           <span>—</span>
-          <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+          <input type="date" value={to} onChange={(e) => {
+            if (e.target.value !== to) {
+              setStatus("loading");
+              setTo(e.target.value);
+            }
+          }} />
         </div>
       )}
 
-      <Tabs active={activeTab} onChange={setActiveTab} />
+      <Tabs active={activeTab} onChange={(tab) => {
+        if (tab !== activeTab) {
+          setStatus("loading");
+          setActiveTab(tab);
+        }
+      }} />
+
+      {mutationError && <p className="status-error" role="alert">{mutationError}</p>}
 
       {status === "loading" && <p className="status-message">Загрузка…</p>}
       {status === "error" && (
@@ -129,7 +187,8 @@ function App({ initialTheme }: { initialTheme: Theme }) {
         </p>
       )}
       {status === "ready" && (
-        <EventList events={visibleEvents} onStatusChange={handleStatusChange} />
+        <EventList events={visibleEvents} onStatusChange={handleStatusChange}
+          onDelete={handleDelete} deletingIds={deletingIds} updatingIds={updatingIds} />
       )}
     </div>
   );

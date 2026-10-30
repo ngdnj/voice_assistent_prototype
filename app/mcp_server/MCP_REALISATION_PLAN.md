@@ -330,3 +330,19 @@ AGENTS §15: каждый владелец добавляет показател
 | 2026-10-23 | B6 (своя часть): CI с PostgreSQL; B7: метрики роли 4 и `/metrics/`; список задач для других ролей | `.github/workflows/backend.yml`, `app/mcp_server/{metrics,server,__main__}.py`, `app/api/records.py`, `tests/mcp_server/test_metrics.py`, план |
 | 2026-10-23 | Исправлены 8 дефектов проверки; D6 изменён (PK `operations` без типа); INTEGRATION v3; 253 passed | `app/storage/postgres/{tables,records}.py`, `migrations/versions/0001_*.py`, `app/mcp_server/{server,tools,schemas}.py`, `app/planner/query.py`, `app/api/records.py`, `tests/*/test_edge_cases.py`, `tests/storage_pg/test_repositories.py` |
 | 2026-10-23 | План переименован в `MCP_REALISATION_PLAN.md`; INTEGRATION v3.1: задачи по ролям, запуск, пример Mini App, метрики | `app/mcp_server/{MCP_REALISATION_PLAN,INTEGRATION,AGENTS}.md`, `README.md` |
+
+### Интервалы задач и встреч (2026-10-30, запрос пользователя)
+
+Используем существующие внешние поля `datetime`/`end_time` и колонку `events.ends_at`.
+Для task с end_time поле datetime означает начало интервала, без end_time сохраняет
+прежний смысл точного срока. Добавляем `Task.ends_at`, обязательность due_at при конце,
+UTC и строгое end > start. DATE не смешивается с интервалом. Миграция 0004 расширяет
+CHECK без изменения прежних записей. При переносе начала сохраняется известная
+длительность; перевод задачи на DATE очищает конец. Точные интервалы задач и встреч
+попадают в период по пересечению `[start,end)`; записи без конца — по началу.
+DTO возвращает end_time также для task; reminder не получает интервал.
+
+REST удаления (тот же блок, пользователь 2026-10-30): DELETE /api/events/{id}
+вызывает существующий EventService.delete_event. Личность — из проверенной initData,
+идемпотентность — обязательный UUID X-Action-Id. HTTP API добавляет CORS DELETE /
+X-Action-Id. Общий контракт опубликован как v7 в INTEGRATION.md.
