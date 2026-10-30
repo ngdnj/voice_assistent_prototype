@@ -86,7 +86,7 @@ uv sync --extra asr
 | `MAX_BOT_TOKEN` | токен бота из кабинета MAX |
 | `MAX_WEBHOOK_SECRET` | любая строка 5–256 символов из `A–Z a–z 0–9 _ -`; без неё webhook не запустится |
 | `MAX_CA_BUNDLE_FILE` | `russian_trusted_root_ca.pem` — сертификат Минцифры в корне проекта (в git не попадает) |
-| `MAX_AUDIO_HOSTS` | `max.ru,oneme.ru` — откуда разрешено скачивать голосовые |
+| `MAX_AUDIO_HOSTS` | можно не задавать: по умолчанию `max.ru,oneme.ru` — откуда разрешено скачивать голосовые |
 | `MCP_URL`, `MCP_SERVICE_TOKEN` | адрес MCP-сервера и общий токен не короче 32 символов |
 | `GIGACHAT_CREDENTIALS`, `GIGACHAT_SCOPE`, `GIGACHAT_CA_BUNDLE_FILE` | доступ к GigaChat; сертификат тот же `russian_trusted_root_ca.pem` |
 | `REDIS_*`, `POSTGRES_*` | можно оставить как в `.env.example` для локального Docker |

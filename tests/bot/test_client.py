@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -28,6 +29,7 @@ def settings(**overrides: object) -> BotSettings:
 @pytest.fixture(autouse=True)
 def no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(client_module, "RETRY_DELAY_S", 0.0)
+    monkeypatch.setattr(client_module, "MIN_SEND_INTERVAL_S", 0.0)
 
 
 async def test_send_uses_header_token_and_chat_id() -> None:
@@ -443,3 +445,34 @@ async def test_send_to_user_addresses_user_id_not_chat() -> None:
     assert len(seen) == 1
     assert dict(seen[0].url.params) == {"user_id": "42"}
     assert empty.outcome == "permanent_failure"
+
+
+async def test_sends_to_one_recipient_are_spaced(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(client_module, "MIN_SEND_INTERVAL_S", 0.2)
+    sent: list[tuple[str, float]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append((str(request.url.params), asyncio.get_running_loop().time()))
+        return httpx.Response(200, json={"message": {"body": {"mid": "m", "text": "ok"}}})
+
+    max_client = MaxClient(settings(), transport=httpx.MockTransport(handler))
+    await asyncio.gather(
+        max_client.send_text(chat_id="777", text="первое"),
+        max_client.send_text(chat_id="777", text="второе"),
+        max_client.send_text(chat_id="888", text="другой чат"),
+        max_client.send_to_user(user_id="777", text="другой адресат"),
+    )
+    await max_client.aclose()
+    times = {params: [at for key, at in sent if key == params] for params, _ in sent}
+    same = times["chat_id=777"]
+    assert len(same) == 2 and same[1] - same[0] >= 0.19
+    # Other recipients do not wait for chat 777.
+    assert times["chat_id=888"][0] - same[0] < 0.1
+    assert times["user_id=777"][0] - same[0] < 0.1
+
+
+def test_voice_hosts_of_max_are_allowed_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MAX_AUDIO_HOSTS", raising=False)
+    monkeypatch.setenv("MAX_BOT_TOKEN", TOKEN)
+    assert BotSettings.from_env().audio_hosts == ("max.ru", "oneme.ru")
+    assert BotSettings(token=TOKEN).audio_hosts == ("max.ru", "oneme.ru")

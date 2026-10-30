@@ -22,6 +22,10 @@ SendOutcome = Literal["delivered", "retryable_failure", "permanent_failure", "un
 MAX_REDIRECTS = 3
 # First retry delay; the documented limit is 2 messages per second per dialog.
 RETRY_DELAY_S = 1.0
+# Spacing of sends to one recipient, so a status, a reply and a reminder stay within that limit.
+MIN_SEND_INTERVAL_S = 0.5
+# Forget pacing slots of idle recipients once there are this many.
+PACING_PRUNE_AT = 1000
 
 
 @dataclass(frozen=True)
@@ -159,6 +163,9 @@ class MaxClient:
             transport=transport,
             verify=verify,
         )
+        # Next allowed send time per recipient, in event-loop time; a lock keeps slots unique.
+        self._next_send: dict[tuple[str, str], float] = {}
+        self._pacing = asyncio.Lock()
         # Audio is downloaded without the bot token: media URLs are not API calls.
         self._media = httpx.AsyncClient(
             timeout=httpx.Timeout(settings.send_timeout_s),
@@ -231,12 +238,26 @@ class MaxClient:
             return "rejected"
         return ""
 
+    async def _pace(self, recipient: tuple[str, str]) -> None:
+        """Wait for this recipient's next send slot (MAX: 2 messages per second per dialog)."""
+        loop = asyncio.get_running_loop()
+        async with self._pacing:
+            now = loop.time()
+            if len(self._next_send) >= PACING_PRUNE_AT:
+                self._next_send = {key: at for key, at in self._next_send.items() if at > now}
+            slot = max(now, self._next_send.get(recipient, now))
+            self._next_send[recipient] = slot + MIN_SEND_INTERVAL_S
+        if slot > now:
+            await asyncio.sleep(slot - now)
+
     async def _send_part(
         self, *, params: Mapping[str, str], text: str, buttons: tuple[tuple[str, str], ...] = ()
     ) -> SendResult:
         delay = RETRY_DELAY_S
         result = SendResult("retryable_failure", error_code="not_sent")
+        recipient = next(iter(params.items()))
         for attempt in range(SEND_ATTEMPTS):
+            await self._pace(recipient)
             try:
                 response = await self._http.post(
                     "/messages", params=dict(params), json=_message_body(text, buttons)

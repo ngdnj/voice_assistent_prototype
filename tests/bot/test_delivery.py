@@ -216,3 +216,36 @@ async def test_run_delivers_published_notifications_until_stopped(stream: Notifi
     await asyncio.wait_for(task, 2)
     assert [text for _, text in sender.calls] == ["первое", "второе"]
     assert await pending(stream) == 0
+
+
+@needs_redis
+async def test_failed_result_write_keeps_entry_pending_for_reclaim(
+    stream: NotificationStream, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    sender = FakeSender()
+    await stream.publish(notice())
+    worker = consumer(stream, sender)
+    real_report = stream.report
+    calls = 0
+
+    async def flaky_report(**kwargs: object) -> bool:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RedisConnectionError("redis down")
+        return await real_report(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(stream, "report", flaky_report)
+    with pytest.raises(RedisConnectionError):
+        await worker.read_new()
+    # Sent, but without a recorded result there is no ACK: the entry stays pending.
+    assert len(sender.calls) == 1
+    assert await results(stream) == []
+    assert await pending(stream) == 1
+    assert await worker.reclaim() == 1
+    [result] = await results(stream)
+    assert (result["status"], result["delivery_count"]) == ("delivered", 2)
+    assert len(sender.calls) == 2  # The contract's at-least-once: a possible duplicate.
+    assert await pending(stream) == 0
