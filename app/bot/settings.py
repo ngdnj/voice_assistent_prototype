@@ -39,6 +39,9 @@ class BotSettings:
     ca_bundle_file: str | None = None
     # Optional restriction for a local live smoke. Other chats receive no messages.
     test_chat_id: str | None = None
+    # Public name of the bot whose Mini App the "open app" button launches; empty hides the button.
+    # The app URL itself is attached to the bot in the MAX partner platform, not here.
+    mini_app_bot: str | None = None
 
     def __post_init__(self) -> None:
         if not self.token.strip():
@@ -73,6 +76,8 @@ class BotSettings:
             raise ValueError("MAX_CA_BUNDLE_FILE must point to an existing PEM file")
         if self.test_chat_id is not None and not re.fullmatch(r"-?[0-9]+", self.test_chat_id):
             raise ValueError("MAX_TEST_CHAT_ID must be a numeric chat ID")
+        if self.mini_app_bot is not None and not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", self.mini_app_bot):
+            raise ValueError("MAX_MINI_APP_BOT must be the bot's public name, e.g. my_bot")
 
     @classmethod
     def from_env(cls) -> "BotSettings":
@@ -90,4 +95,5 @@ class BotSettings:
             max_concurrency=int(os.environ.get("BOT_MAX_CONCURRENCY", "8")),
             ca_bundle_file=os.environ.get("MAX_CA_BUNDLE_FILE") or None,
             test_chat_id=os.environ.get("MAX_TEST_CHAT_ID") or None,
+            mini_app_bot=os.environ.get("MAX_MINI_APP_BOT", "").strip().lstrip("@") or None,
         )

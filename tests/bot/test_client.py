@@ -6,6 +6,7 @@ import pytest
 
 from app.bot import client as client_module
 from app.bot.client import (
+    AppButton,
     AudioFetchError,
     AudioSourceError,
     AudioTooLargeError,
@@ -476,3 +477,31 @@ def test_voice_hosts_of_max_are_allowed_by_default(monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("MAX_BOT_TOKEN", TOKEN)
     assert BotSettings.from_env().audio_hosts == ("max.ru", "oneme.ru")
     assert BotSettings(token=TOKEN).audio_hosts == ("max.ru", "oneme.ru")
+
+
+async def test_mini_app_button_is_sent_as_open_app() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"message": {"body": {"mid": "mid.8"}}})
+
+    max_client = MaxClient(settings(), transport=httpx.MockTransport(handler))
+    result = await max_client.send_text(
+        chat_id="1", text="Приложение", buttons=(AppButton("Открыть приложение", "gorky_bot"),)
+    )
+    assert result.ok
+    assert json.loads(seen[0].content)["attachments"] == [
+        {
+            "type": "inline_keyboard",
+            "payload": {
+                "buttons": [[{"type": "open_app", "text": "Открыть приложение", "web_app": "gorky_bot"}]]
+            },
+        }
+    ]
+
+
+def test_mini_app_bot_setting_is_validated() -> None:
+    assert settings(mini_app_bot="gorky_bot").mini_app_bot == "gorky_bot"
+    with pytest.raises(ValueError, match="MAX_MINI_APP_BOT"):
+        settings(mini_app_bot="https://evil.example/x")

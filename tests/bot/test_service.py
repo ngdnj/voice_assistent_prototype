@@ -5,7 +5,7 @@ import pytest
 from app.asr.audio import AudioDecodeError
 from app.asr.base import AsrError, AudioTooLongError
 from app.bot import messages
-from app.bot.client import AudioFetchError, AudioSourceError, AudioTooLargeError, SendResult
+from app.bot.client import AppButton, AudioFetchError, AudioSourceError, AudioTooLargeError, SendResult
 from app.bot.service import CONFIRM_BUTTONS, BackendRequest, BackgroundRunner, Reply
 from app.bot.updates import AudioRef, BotStarted, CallbackPressed, Ignored, MessageCreated
 from tests.bot.fakes import (
@@ -421,3 +421,43 @@ async def test_unknown_payload_and_missing_chat_are_ignored() -> None:
     assert await bot.handle(press("other")) == "ignored"
     assert await bot.handle(press(messages.CONFIRM_NO, "cb.3", chat_id=None)) == "ignored"
     assert parts["sender"].texts == []  # type: ignore[attr-defined]
+
+
+APP = MessageCreated(message_id="mid.9", chat_id="777", owner_id="42", text="/app", audio=None)
+APP_BUTTON = AppButton(messages.OPEN_APP_TEXT, "gorky_bot")
+
+
+async def test_welcome_has_mini_app_button_when_configured() -> None:
+    bot, parts = build_bot(mini_app_bot="gorky_bot")
+    assert await bot.handle(START) == "welcomed"
+    assert parts["sender"].buttons == [(APP_BUTTON,)]  # type: ignore[attr-defined]
+
+
+async def test_welcome_has_no_buttons_without_mini_app() -> None:
+    bot, parts = build_bot()
+    assert await bot.handle(START) == "welcomed"
+    assert parts["sender"].buttons == [()]  # type: ignore[attr-defined]
+
+
+async def test_app_command_sends_button_and_skips_backend() -> None:
+    bot, parts = build_bot(mini_app_bot="gorky_bot")
+    assert await bot.handle(APP) == "app_offered"
+    sender = parts["sender"]
+    assert sender.texts == [messages.APP_INVITE]  # type: ignore[attr-defined]
+    assert sender.buttons == [(APP_BUTTON,)]  # type: ignore[attr-defined]
+    assert not parts["backend"].requests  # type: ignore[attr-defined]
+    assert not parts["gate"].locks  # type: ignore[attr-defined]
+
+
+async def test_app_command_without_mini_app_says_unavailable() -> None:
+    bot, parts = build_bot()
+    assert await bot.handle(APP) == "app_offered"
+    assert parts["sender"].texts == [messages.APP_UNAVAILABLE]  # type: ignore[attr-defined]
+    assert parts["sender"].buttons == [()]  # type: ignore[attr-defined]
+
+
+async def test_app_command_while_busy_gets_busy_message() -> None:
+    bot, parts = build_bot(mini_app_bot="gorky_bot")
+    parts["gate"].locks["42"] = "job-1"  # type: ignore[attr-defined]
+    assert await bot.handle(APP) == "busy"
+    assert parts["sender"].texts == [messages.BUSY]  # type: ignore[attr-defined]

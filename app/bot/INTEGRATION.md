@@ -1,6 +1,6 @@
 # Интеграция с ролью 2: MAX bot
 
-> **Статус: v2.8 — напоминания приходят в MAX** (`app/bot/`, локальный запуск `python -m app.bot`).
+> **Статус: v2.9 — кнопка Mini App, напоминания приходят в MAX** (`app/bot/`, локальный запуск `python -m app.bot`).
 > Потребитель потока уведомлений реализован (раздел 6); публикацию напоминаний пока делает
 > временный планировщик бота до появления dispatcher роли 1. Изменения — только через журнал версий.
 
@@ -35,7 +35,7 @@ BotService сохраняет ID сообщения «Принял запрос�
 | 1 | `AgentBackend` подключён; дальше смонтировать `webhook_router` в общий API, согласовать состояния диалога и заменить `BackgroundRunner` на jobs/outbox. Dispatcher публикует наступившие напоминания через `NotificationStream.publish` — после этого временный `app/bot/reminders.py` удаляется | 3, 4, 5, 6, 10 |
 | 3 | Ничего нового: бот вызывает `SpeechRecognizer.transcribe(audio, suffix)` и обрабатывает его ошибки по `docs/ML.md` §1 | 4 |
 | 4 | Ничего нового: владелец — `str(user_id)` MAX, как в `initData`; `MAX_BOT_TOKEN` общий. Временный планировщик только читает `events` (напоминания, `deleted_at IS NULL`); переименование колонок `scheduled_at`, `event_type`, `deleted_at` согласовать с ролью 2 | 1, 6, 7 |
-| 5 | Ничего нового в этой версии | — |
+| 5 | Mini App открывается кнопкой бота (v2.9): `initData` брать из `window.WebApp.initData` (MAX Bridge), API — относительный `/api` на том же домене | 1, 11 |
 | 6 | Панели по метрикам раздела 8, включая доставку уведомлений (v2.7) | 8 |
 
 ## 1. Сценарий
@@ -66,6 +66,12 @@ bot_started или /start ─▶ приветствие
   Ответ с кнопками приходит новым сообщением, а статус удаляется (`DELETE /messages`).
   Отдельного сообщения «Распознано: …» больше нет.
   Ошибка или пустой ответ backend — честное «Не получилось обработать запрос…».
+
+- Mini App (v2.9). При заданном `MAX_MINI_APP_BOT` приветствие (`bot_started`, `/start`, `/help`) несёт кнопку
+  «Открыть приложение» (`type: "open_app"`, `web_app` — публичное имя бота), а команда `/app` присылает её
+  отдельным сообщением. Без настройки кнопки нет, `/app` отвечает «Приложение пока недоступно…».
+  `/app` во время обработки получает сообщение о занятости. Адрес приложения задаётся не ботом, а в
+  настройках бота на платформе MAX для партнёров; там же MAX добавляет свою кнопку запуска в чат.
 
 ## 2. Модули
 
@@ -261,6 +267,7 @@ PostgreSQL events (reminder, scheduled_at наступил) ─▶ ReminderSched
 | `BOT_BUSY_TTL_S` | `180` | TTL блокировки; должен превышать обработку и все попытки отправки |
 | `BOT_MAX_CONCURRENCY` | `8` | число одновременно обрабатываемых запросов в процессе |
 | `MAX_TEST_CHAT_ID` | пусто | необязательное ограничение локального запуска одним тестовым чатом |
+| `MAX_MINI_APP_BOT` | пусто | публичное имя бота для кнопки `open_app` (v2.9); пусто — кнопки нет |
 
 Переменные с безопасными значениями по умолчанию внесены в `.env.example` (блок «Role 2»).
 
@@ -270,8 +277,8 @@ PostgreSQL events (reminder, scheduled_at наступил) ─▶ ReminderSched
 
 | Метрика | Тип | Метки |
 | --- | --- | --- |
-| `assistant_bot_updates_total` | counter | `kind` (`text`, `audio`, `start`, `other`), `outcome` (`accepted`, `busy`, `welcomed`, `unsupported`, `invalid_input`, `duplicate`, `ignored`, `no_payload`, `rejected`, `unauthorized`, `invalid`, `error`) |
-| `assistant_bot_send_total` | counter | `purpose` (`welcome`, `status`, `transcript`, `reply`, `busy`, `error`), `outcome` (`delivered`, `retryable_failure`, `permanent_failure`, `unknown`) |
+| `assistant_bot_updates_total` | counter | `kind` (`text`, `audio`, `start`, `other`), `outcome` (`accepted`, `busy`, `welcomed`, `unsupported`, `invalid_input`, `duplicate`, `ignored`, `no_payload`, `rejected`, `unauthorized`, `invalid`, `error`, `app_offered`) |
+| `assistant_bot_send_total` | counter | `purpose` (`welcome`, `status`, `transcript`, `reply`, `busy`, `error`, `edit`, `repeat`, `app`), `outcome` (`delivered`, `retryable_failure`, `permanent_failure`, `unknown`) |
 | `assistant_bot_send_seconds` | histogram | `purpose` |
 | `assistant_bot_audio_fetch_total` | counter | `outcome` (`ok`, `source_error`, `too_large`, `fetch_error`) |
 | `assistant_bot_processing_total` | counter | `outcome` (`replied`, `not_heard`, `audio_error`, `asr_error`, `timeout`, `failed`, `cancelled`) |
@@ -325,3 +332,4 @@ PostgreSQL events (reminder, scheduled_at наступил) ─▶ ReminderSched
 | v2.6 | 2026-10-26 | `Backend.answer` возвращает `str` или `Reply(text, buttons)`; статус «Принял запрос…» удаляется после ответа с кнопками (обычный ответ по-прежнему заменяет статус, v2.2); сообщение «Распознано» убрано; кнопки-callback «Да, все верно» / «Нет» (`confirm:yes` / `confirm:no`), событие `message_callback` (нужна переподписка), «Нет» → «Повторите запрос.» |
 | v2.7 | 2026-10-27 | Напоминания: `DeliveryConsumer` (поток `max-delivery-v1` → `POST /messages?user_id=`), `MaxClient.send_to_user`, временный `ReminderScheduler` (PostgreSQL только чтение, ключ `bot:reminder`), запуск вместе с ботом и флаг `--no-reminders`, метрики доставки. Контракт `docs/notification-stream.md` не менялся |
 | v2.8 | 2026-10-27 | Без изменения контракта: `oneme.ru` снова разрешён по умолчанию (терялся при слиянии); отправки одному адресату не чаще одной в 0,5 с; тесты сбоя записи результата доставки и отсутствия текстов и секретов в логах; уточнены подписка (`message_callback`), команда туннеля и открытые вопросы |
+| v2.9 | 2026-10-30 | Кнопка Mini App: `AppButton` (`open_app`) в `Buttons`/`Sender.send_text`, приветствие с кнопкой и команда `/app` при `MAX_MINI_APP_BOT`, исход `app_offered`, `purpose="app"`. Входной контракт `Backend` не менялся; реализация `Sender` роли 1 должна принимать `AppButton` в `buttons` |

@@ -25,6 +25,10 @@ CONFIRM_YES_TEXT = "Да, все верно"
 CONFIRM_NO_TEXT = "Нет"
 NOT_ACCEPTED = "Сейчас не получается принять запрос. Попробуйте ещё раз чуть позже."
 START_COMMANDS = frozenset({"/start", "/help"})
+APP_COMMANDS = frozenset({"/app"})
+OPEN_APP_TEXT = "Открыть приложение"
+APP_INVITE = "Задачи, напоминания и встречи можно посмотреть в приложении."
+APP_UNAVAILABLE = "Приложение пока недоступно. Пользуйтесь запросами текстом или голосом."
 
 # Text of a due reminder; the name and description come from the saved record.
 REMINDER = "🔔 Напоминание: {name}"

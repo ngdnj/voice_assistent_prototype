@@ -2,20 +2,32 @@ import { useEffect, useState } from "react";
 import "./App.css";
 import { Tabs } from "./Tabs";
 import { EventList } from "./EventList";
-import { fetchEvents, searchEvents, updateTaskStatus } from "./api";
+import { fetchEvents, searchEvents, UnauthorizedError, updateTaskStatus } from "./api";
 import type { EventRecord, EventType, TaskStatus } from "./types";
 
-type Status = "loading" | "error" | "ready";
+type Status = "loading" | "error" | "unauthorized" | "ready";
+
+// Дата YYYY-MM-DD в локальной зоне пользователя (toISOString дал бы дату по UTC).
+function localDate(date: Date): string {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+// Начало локальных суток: так период совпадает с тем, как его понимает бот.
+function startOfLocalDay(value: string): Date {
+  return new Date(`${value}T00:00:00`);
+}
 
 function App() {
   const [activeTab, setActiveTab] = useState<EventType>("task");
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [status, setStatus] = useState<Status>("loading");
-  const [from, setFrom] = useState(() => new Date().toISOString().slice(0, 10));
+  const [from, setFrom] = useState(() => localDate(new Date()));
   const [to, setTo] = useState(() => {
     const d = new Date();
     d.setDate(d.getDate() + 7);
-    return d.toISOString().slice(0, 10);
+    return localDate(d);
   });
   const [query, setQuery] = useState("");
 
@@ -26,25 +38,28 @@ function App() {
     // Поиск по смыслу (query) не привязан к периоду — он должен находить
     // даже задачи без срока. Если строка поиска пустая — обычная загрузка по периоду.
     const trimmed = query.trim();
-    const request = trimmed
-      ? searchEvents(trimmed, activeTab)
-      : (() => {
-          const start = new Date(from).toISOString();
-          const endDate = new Date(to);
-          endDate.setDate(endDate.getDate() + 1);
-          return fetchEvents(start, endDate.toISOString());
-        })();
+    const load = () => {
+      if (trimmed) return searchEvents(trimmed, activeTab);
+      // Полуинтервал [начало дня from, начало дня после to) в локальной зоне.
+      const start = startOfLocalDay(from).toISOString();
+      const endDate = startOfLocalDay(to);
+      endDate.setDate(endDate.getDate() + 1);
+      return fetchEvents(start, endDate.toISOString());
+    };
 
+    // Запрос создаётся только после задержки, поэтому отменённый ввод не уходит на сервер.
+    // Promise.resolve().then ловит и синхронные ошибки, например пустую дату.
     const timer = setTimeout(() => {
-      request
+      Promise.resolve()
+        .then(load)
         .then((data) => {
           if (!cancelled) {
             setEvents(data);
             setStatus("ready");
           }
         })
-        .catch(() => {
-          if (!cancelled) setStatus("error");
+        .catch((error: unknown) => {
+          if (!cancelled) setStatus(error instanceof UnauthorizedError ? "unauthorized" : "error");
         });
     }, 300); // небольшая задержка, чтобы не слать запрос на каждую букву
 
@@ -96,6 +111,11 @@ function App() {
       {status === "error" && (
         <p className="status-message status-error">
           Не удалось загрузить записи. Попробуйте ещё раз.
+        </p>
+      )}
+      {status === "unauthorized" && (
+        <p className="status-message status-error">
+          Откройте приложение заново из чата с ботом в MAX.
         </p>
       )}
       {status === "ready" && (
