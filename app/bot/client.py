@@ -29,6 +29,21 @@ PACING_PRUNE_AT = 1000
 
 
 @dataclass(frozen=True)
+class AppButton:
+    """Inline button of type `open_app`: opens the Mini App of the bot named by `web_app`.
+
+    https://dev.max.ru/docs-api/methods/POST/messages: `web_app` is the bot's public name or link.
+    """
+
+    text: str
+    web_app: str
+
+
+# A callback button is (text, payload); an AppButton opens the Mini App.
+Button = tuple[str, str] | AppButton
+
+
+@dataclass(frozen=True)
 class SendResult:
     outcome: SendOutcome
     external_message_id: str = ""
@@ -102,10 +117,17 @@ def split_text(text: str, limit: int = MAX_TEXT_LENGTH) -> list[str]:
     return parts
 
 
-def _message_body(text: str, buttons: tuple[tuple[str, str], ...]) -> dict[str, object]:
+def _button(button: Button) -> dict[str, str]:
+    if isinstance(button, AppButton):
+        return {"type": "open_app", "text": button.text, "web_app": button.web_app}
+    label, payload = button
+    return {"type": "callback", "text": label, "payload": payload}
+
+
+def _message_body(text: str, buttons: tuple[Button, ...]) -> dict[str, object]:
     body: dict[str, object] = {"text": text}
     if buttons:
-        row = [{"type": "callback", "text": label, "payload": payload} for label, payload in buttons]
+        row = [_button(button) for button in buttons]
         body["attachments"] = [{"type": "inline_keyboard", "payload": {"buttons": [row]}}]
     return body
 
@@ -178,12 +200,10 @@ class MaxClient:
         await self._http.aclose()
         await self._media.aclose()
 
-    async def send_text(
-        self, *, chat_id: str, text: str, buttons: tuple[tuple[str, str], ...] = ()
-    ) -> SendResult:
+    async def send_text(self, *, chat_id: str, text: str, buttons: tuple[Button, ...] = ()) -> SendResult:
         """Send one message (split if needed). Retries 429/5xx; a timeout is `unknown`, not failure.
 
-        `buttons` are (text, payload) callback buttons in one row, attached to the last part.
+        `buttons` (callback or Mini App) form one row attached to the last part.
         """
         if not text.strip():
             return SendResult("permanent_failure", error_code="empty_text")
@@ -251,7 +271,7 @@ class MaxClient:
             await asyncio.sleep(slot - now)
 
     async def _send_part(
-        self, *, params: Mapping[str, str], text: str, buttons: tuple[tuple[str, str], ...] = ()
+        self, *, params: Mapping[str, str], text: str, buttons: tuple[Button, ...] = ()
     ) -> SendResult:
         delay = RETRY_DELAY_S
         result = SendResult("retryable_failure", error_code="not_sent")

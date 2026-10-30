@@ -89,6 +89,7 @@ def build_bot(
         processing_timeout_s=settings.processing_timeout_s,
         clock=lambda: datetime.now(UTC),
         allowed_chat_id=settings.test_chat_id,
+        mini_app_bot=settings.mini_app_bot,
     )
 
 

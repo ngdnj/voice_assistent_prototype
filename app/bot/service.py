@@ -17,7 +17,14 @@ from uuid import UUID, uuid4
 from app.asr.audio import AudioDecodeError
 from app.asr.base import AsrError, AudioTooLongError, SpeechRecognizer
 from app.bot import messages, metrics
-from app.bot.client import AudioFetchError, AudioSourceError, AudioTooLargeError, SendResult
+from app.bot.client import (
+    AppButton,
+    AudioFetchError,
+    AudioSourceError,
+    AudioTooLargeError,
+    Button,
+    SendResult,
+)
 from app.bot.gate import Gate
 from app.bot.updates import (
     BotEvent,
@@ -43,9 +50,10 @@ Outcome = Literal[
     "rejected",
     "confirmed",
     "repeat_requested",
+    "app_offered",
 ]
 
-Buttons = tuple[tuple[str, str], ...]  # (button text, callback payload), one row
+Buttons = tuple[Button, ...]  # one row: (text, callback payload) or AppButton
 
 # "Is that right?" keyboard under the demo reply; "yes" has no action yet.
 CONFIRM_BUTTONS: Buttons = (
@@ -147,6 +155,7 @@ class BotService:
         processing_timeout_s: float,
         clock: Callable[[], datetime],
         allowed_chat_id: str | None = None,
+        mini_app_bot: str | None = None,
     ) -> None:
         self._sender = sender
         self._gate = gate
@@ -158,6 +167,10 @@ class BotService:
         self._timeout = processing_timeout_s
         self._clock = clock
         self._allowed_chat_id = allowed_chat_id
+        # The Mini App button appears only when the app is attached to the bot in MAX.
+        self._app_buttons: Buttons = (
+            (AppButton(messages.OPEN_APP_TEXT, mini_app_bot),) if mini_app_bot else ()
+        )
 
     async def handle(self, event: BotEvent) -> Outcome:
         """Handle one parsed update. Redis errors propagate so the webhook is redelivered."""
@@ -205,6 +218,8 @@ class BotService:
             return await self._callback(event)
         if event.text is not None and event.text.strip().lower() in messages.START_COMMANDS:
             return await self._welcome(event.owner_id, event.chat_id)
+        if event.text is not None and event.text.strip().lower() in messages.APP_COMMANDS:
+            return await self._offer_app(event.owner_id, event.chat_id)
         if event.text is not None and not has_meaningful_text(event.text):
             if await self._gate.is_busy(event.owner_id):
                 await self._send(event.chat_id, messages.BUSY, "busy")
@@ -263,8 +278,18 @@ class BotService:
         if await self._gate.is_busy(owner_id):
             await self._send(chat_id, messages.BUSY, "busy")
             return "busy"
-        await self._send(chat_id, messages.WELCOME, "welcome")
+        await self._send(chat_id, messages.WELCOME, "welcome", self._app_buttons)
         return "welcomed"
+
+    async def _offer_app(self, owner_id: str, chat_id: str) -> Outcome:
+        if await self._gate.is_busy(owner_id):
+            await self._send(chat_id, messages.BUSY, "busy")
+            return "busy"
+        if not self._app_buttons:
+            await self._send(chat_id, messages.APP_UNAVAILABLE, "app")
+            return "app_offered"
+        await self._send(chat_id, messages.APP_INVITE, "app", self._app_buttons)
+        return "app_offered"
 
     async def _send(self, chat_id: str, text: str, purpose: str, buttons: Buttons = ()) -> SendResult:
         started = time.monotonic()

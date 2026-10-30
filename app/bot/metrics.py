@@ -10,7 +10,8 @@ UPDATES = Counter(
 SENDS = Counter(
     "assistant_bot_send_total",
     "Messages sent to MAX",
-    ["purpose", "outcome"],  # purpose: welcome | status | transcript | reply | busy | error | edit
+    # purpose: welcome | status | transcript | reply | busy | error | edit | repeat | app
+    ["purpose", "outcome"],
 )
 SEND_SECONDS = Histogram(
     "assistant_bot_send_seconds",

@@ -5,7 +5,7 @@ from collections.abc import Coroutine
 from datetime import UTC, datetime
 
 from app.asr.base import Transcript
-from app.bot.client import SendResult
+from app.bot.client import Button, SendResult
 from app.bot.service import BackendRequest, BotService
 
 NOW = datetime(2026, 10, 25, 9, 30, tzinfo=UTC)
@@ -18,13 +18,11 @@ class FakeSender:
         self.actions: list[str] = []
         self.edit_result = SendResult("delivered", external_message_id="mid.1")
         self.result = SendResult("delivered", external_message_id="mid.1")
-        self.buttons: list[tuple[tuple[str, str], ...]] = []
+        self.buttons: list[tuple[Button, ...]] = []
         self.deleted: list[str] = []
         self.answered: list[str] = []
 
-    async def send_text(
-        self, *, chat_id: str, text: str, buttons: tuple[tuple[str, str], ...] = ()
-    ) -> SendResult:
+    async def send_text(self, *, chat_id: str, text: str, buttons: tuple[Button, ...] = ()) -> SendResult:
         self.sent.append((chat_id, text))
         self.actions.append(text)
         self.buttons.append(buttons)
