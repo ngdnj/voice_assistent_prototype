@@ -1,6 +1,7 @@
 """Compact chat lists built only from records returned by the backend."""
 
 from datetime import date, datetime
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 from app.mcp_server.schemas import EventDTO, sort_events
@@ -33,6 +34,21 @@ SORT_LABELS = {
 }
 MAX_ITEMS = 20
 MAX_CHARS = 3800  # Leave room within MAX's 4000-character limit.
+
+
+def format_saved_events(
+    events: list[EventDTO],
+    action: Literal["created", "updated", "deleted"],
+    *,
+    reference_time: datetime,
+    timezone: ZoneInfo,
+) -> str:
+    """Describe successful writes using returned records, never model claims."""
+    listing = format_event_list(events, reference_time=reference_time, timezone=timezone)
+    heading, _, body = listing.partition("\n")
+    subject = "записи" if heading == "Планы:" else heading.removesuffix(":").lower()
+    verb = {"created": "Созданы", "updated": "Изменены", "deleted": "Удалены"}[action]
+    return f"{verb} {subject}:\n{body}"
 
 
 def _day(value: date, today: date) -> str:

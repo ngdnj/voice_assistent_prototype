@@ -117,3 +117,6 @@ git diff --check прошли. Реальные MAX/GigaChat/ASR в этом б�
 
 Результаты последующего прогона с настоящим GigaChat и обнаруженные ограничения:
 [live-smoke-2026-10-30.md](live-smoke-2026-10-30.md).
+
+Повторы дат, остановка цикла модели и отчёт по фактически сохранённым записям:
+[agent-result-reporting.md](agent-result-reporting.md).

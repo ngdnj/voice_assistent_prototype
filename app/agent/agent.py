@@ -8,13 +8,14 @@ import re
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, cast
+from datetime import UTC, datetime
+from typing import Any, Literal, cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
 from zoneinfo import ZoneInfo
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from pydantic import ValidationError
 
 from app.agent.history import ChatHistory, TurnState
 from app.agent.mcp import TOOLS, Caller, ToolGateway
@@ -28,7 +29,7 @@ from app.agent.permissions import (
     off_topic,
     short_clarification,
 )
-from app.agent.presentation import format_event_list
+from app.agent.presentation import format_event_list, format_saved_events
 from app.agent.time_input import has_explicit_time
 from app.agent.tools import model_tool_schemas
 from app.llm.arg_checks import annotate_result, check_args, normalize_args
@@ -56,6 +57,7 @@ CLAIM = re.compile(
     re.I,
 )
 CONTEXT_FIELDS = frozenset({"owner_id", "user_id", "action_id", "operation_id", "request_id"})
+PARTIAL_WRITE_NOTE = "Не удалось проверить выполнение всего запроса. Выше — только подтверждённые записи."
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,22 @@ class TemporaryToolError(RuntimeError):
 
 def _planned_changes(plan: dict[str, Any]) -> list[dict[str, Any]]:
     return list(plan["changes"]) if "changes" in plan else [plan]
+
+
+def _create_identity(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Compare equal instants/defaults within one turn without changing tool arguments."""
+    identity = {k: v for k, v in arguments.items() if v is not None}
+    identity.setdefault("description", "")
+    if isinstance(identity.get("name"), str):
+        identity["name"] = identity["name"].strip()
+    for key in ("datetime", "end_time"):
+        value = identity.get(key)
+        if isinstance(value, str):
+            with suppress(ValueError):
+                moment = datetime.fromisoformat(value)
+                if moment.utcoffset() is not None:
+                    identity[key] = moment.astimezone(UTC).isoformat()
+    return identity
 
 
 def _trace(messages: list[BaseMessage]) -> list[ToolCall]:
@@ -244,9 +262,19 @@ class Assistant:
                 for _ in range(self.max_steps):
                     question = await self._pending(caller, chat_id, operation_id, state, moment)
                     if question is not None:
-                        state.messages.append(AIMessage(question))
+                        summary = self._write_answer(state, moment, zone)
+                        state.messages.append(AIMessage((summary + "\n\n" if summary else "") + question))
                         state.complete = True
                         break
+                    calls = _trace(state.messages)
+                    if len(calls) >= 2 and all(
+                        c.ok and c.result is not None and c.result.get("already_applied") for c in calls[-2:]
+                    ):
+                        summary = self._write_answer(state, moment, zone, incomplete=True)
+                        if summary is not None:
+                            state.messages.append(AIMessage(summary))
+                            state.complete = True
+                            break
                     steps = sum(isinstance(m, AIMessage) for m in state.messages)
                     if steps >= self.max_steps:
                         break
@@ -258,7 +286,10 @@ class Assistant:
                         > 48000
                     ):
                         state.messages.append(
-                            AIMessage("Слишком много данных для обработки. Уточните период или поиск.")
+                            AIMessage(
+                                self._write_answer(state, moment, zone, incomplete=True)
+                                or "Слишком много данных для обработки. Уточните период или поиск."
+                            )
                         )
                         state.complete = True
                         break
@@ -268,7 +299,24 @@ class Assistant:
                             "Если данных не хватает, задай конкретный уточняющий вопрос."
                         )
                     with llm_session(user_id):
-                        answer = await bound.ainvoke(messages)
+                        try:
+                            answer = await bound.ainvoke(messages)
+                        except Exception as exc:
+                            summary = self._write_answer(state, moment, zone, incomplete=True)
+                            if summary is None:
+                                raise
+                            LOGGER.warning(
+                                json.dumps(
+                                    {
+                                        "event": "agent_model_failed_after_write",
+                                        "request_id": request_id,
+                                        "error_type": type(exc).__name__,
+                                    }
+                                )
+                            )
+                            state.messages.append(AIMessage(summary))
+                            state.complete = True
+                            break
                     if not isinstance(answer, AIMessage):
                         raise RuntimeError("Model returned an invalid message")
                     if answer.usage_metadata:
@@ -308,6 +356,16 @@ class Assistant:
                         state.complete = True
                         break
                     saved = self._saved(state)
+                    if saved and (
+                        plain.rstrip().endswith("?")
+                        or sum(c.name in MUTATING_TOOLS for c in _trace(state.messages)) > 1
+                    ):
+                        summary = self._write_answer(state, moment, zone)
+                        if summary is not None:
+                            plain = summary + ("\n\n" + plain if plain.rstrip().endswith("?") else "")
+                            state.messages.append(AIMessage(plain))
+                            state.complete = True
+                            break
                     if (
                         (CLAIM.search(plain) and not saved)
                         or (
@@ -330,14 +388,12 @@ class Assistant:
                 if not state.complete:
                     # Resolve the final admitted tool calls before reporting the step limit.
                     question = await self._pending(caller, chat_id, operation_id, state, moment)
-                    saved = self._saved(state)
+                    summary = self._write_answer(state, moment, zone, incomplete=True)
                     state.messages.append(
                         AIMessage(
-                            question
+                            ((summary + "\n\n" if summary else "") + question)
                             if question is not None
-                            else "Действие выполнено, но не удалось сформировать полный ответ."
-                            if saved
-                            else "Не удалось завершить обработку за отведённое число шагов."
+                            else summary or "Не удалось завершить обработку за отведённое число шагов."
                         )
                     )
                     state.complete = True
@@ -417,7 +473,14 @@ class Assistant:
                     (
                         c.result
                         for c in _trace(state.messages)
-                        if name in MUTATING_TOOLS and c.name == name and c.args == arguments and c.ok
+                        if name in MUTATING_TOOLS
+                        and c.name == name
+                        and c.ok
+                        and (
+                            _create_identity(c.args) == _create_identity(arguments)
+                            if name == "create_event"
+                            else c.args == arguments
+                        )
                     ),
                     None,
                 )
@@ -480,7 +543,12 @@ class Assistant:
                         }
                     }
                 elif previous is not None:
-                    result = previous
+                    result = {
+                        **previous,
+                        "already_applied": True,
+                        "note": "Эта операция уже выполнена в текущем запросе. Не вызывай её повторно. "
+                        "Продолжи только с ещё не сохранёнными записями или закончи ответ.",
+                    }
                 elif name in {"update_event", "delete_event", "reschedule_meeting"} and not is_approved:
                     plan = {
                         "name": name,
@@ -704,6 +772,53 @@ class Assistant:
             sort=cast(RecordSort, sort),
             truncated=truncated,
         )
+
+    @staticmethod
+    def _write_answer(
+        state: TurnState, reference_time: datetime, zone: ZoneInfo, *, incomplete: bool = False
+    ) -> str | None:
+        groups: dict[Literal["created", "updated", "deleted"], dict[str, EventDTO]] = {
+            "created": {},
+            "updated": {},
+            "deleted": {},
+        }
+        missing = False
+        failed = False
+        fields = {
+            "create_event": "created",
+            "update_event": "updated",
+            "reschedule_meeting": "updated",
+            "delete_event": "deleted",
+        }
+        for call in _trace(state.messages):
+            if call.name not in fields or call.result is None:
+                continue
+            if not call.ok:
+                failed |= call.result.get("error", {}).get("code") != "confirmation_required"
+                continue
+            key = cast(Literal["created", "updated", "deleted"], fields[call.name])
+            if key not in call.result:
+                continue
+            try:
+                record = EventDTO.model_validate(call.result[key])
+            except ValidationError:
+                missing = True
+            else:
+                groups[key][str(record.id)] = record
+        sections = [
+            format_saved_events(list(records.values()), action, reference_time=reference_time, timezone=zone)
+            for action, records in groups.items()
+            if records
+        ]
+        if missing:
+            sections.append("Операция с записью подтверждена, но сведения о ней недоступны.")
+        if not sections:
+            return None
+        if incomplete:
+            sections.append(PARTIAL_WRITE_NOTE)
+        elif failed:
+            sections.append("Проверьте список: некоторые попытки сохранения завершились ошибкой.")
+        return "\n\n".join(sections)
 
     @staticmethod
     def _saved(state: TurnState, *, name: str | None = None) -> bool:

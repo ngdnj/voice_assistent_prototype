@@ -173,6 +173,33 @@ class AgentIntegrationTests(unittest.IsolatedAsyncioTestCase):
             if keys:
                 await self.redis.delete(*keys)
 
+    async def test_multi_date_creation_reports_saved_rows_when_model_repeats_a_date(self):
+        days = [24, 25, 26, 26, 26, 26]
+        model = ScriptedModel(
+            responses=[
+                tool(
+                    arguments={
+                        "event_type": "reminder",
+                        "name": "Проверить отчёт",
+                        "datetime": f"2026-10-{day}T14:00:00+03:00",
+                    },
+                    call_id=f"create-{i}",
+                )
+                for i, day in enumerate(days)
+            ]
+        )
+        agent = Assistant(model, self.gateway, self.history)
+        text = "Напомни проверить отчёт завтра, послезавтра, после послезавтра, в понедельник в 14:00"
+        reply = await agent.handle(self.owner, text, operation_id="repeated-dates", **TIME)
+        self.assertEqual(await self.count(), 3)
+        self.assertEqual(len(model.seen), 5)
+        self.assertEqual(reply.text.count("Проверить отчёт"), 3)
+        self.assertTrue(reply.text.startswith("Созданы напоминания:"))
+        self.assertNotIn("не удалось сформировать полный ответ", reply.text)
+        replay = await agent.handle(self.owner, text, operation_id="repeated-dates", **TIME)
+        self.assertEqual(replay.text, reply.text)
+        self.assertEqual(await self.count(), 3)
+
     async def test_create_all_types_then_period_search_and_owner_isolation(self):
         task = await self.create(event_type="task", name="Подготовить отчёт", date="2026-10-24")
         await self.create(event_type="meeting", name="Обсудить бюджет", datetime="2026-10-24T10:00:00+03:00")
