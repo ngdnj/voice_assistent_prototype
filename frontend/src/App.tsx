@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import "./App.css";
 import { Tabs } from "./Tabs";
 import { EventList } from "./EventList";
+import { EventEditor } from "./EventEditor";
+import type { EventPatch } from "./eventEditing";
 import { ThemeToggle } from "./ThemeToggle";
 import { applyTheme, type Theme } from "./theme";
-import { deleteEvent, fetchEvents, searchEvents, UnauthorizedError, updateTaskStatus } from "./api";
+import { deleteEvent, fetchEvents, searchEvents, UnauthorizedError, updateEvent, updateTaskStatus } from "./api";
 import type { EventRecord, EventType, TaskStatus } from "./types";
 
 type Status = "loading" | "error" | "unauthorized" | "ready";
@@ -34,16 +36,22 @@ function App({ initialTheme }: { initialTheme: Theme }) {
   });
   const [query, setQuery] = useState("");
   const [mutationError, setMutationError] = useState<string | null>(null);
+  const [mutationNotice, setMutationNotice] = useState<string | null>(null);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
   const [updatingIds, setUpdatingIds] = useState<Set<string>>(new Set());
+  const [editing, setEditing] = useState<EventRecord | null>(null);
+  const [reload, setReload] = useState(0);
+  const mutationVersion = useRef(0);
   const deletedIds = useRef(new Set<string>());
   const deleting = useRef(new Set<string>());
   const updating = useRef(new Set<string>());
   // A retry after an uncertain network result must refer to the same logical deletion.
   const deleteOperations = useRef(new Map<string, string>());
+  const editOperations = useRef(new Map<string, { payload: string; operationId: string }>());
 
   useEffect(() => {
     let cancelled = false;
+    const version = mutationVersion.current;
 
     // Поиск по словам (query) не привязан к периоду — он должен находить
     // даже задачи без срока. Если строка поиска пустая — обычная загрузка по периоду.
@@ -63,14 +71,14 @@ function App({ initialTheme }: { initialTheme: Theme }) {
       Promise.resolve()
         .then(load)
         .then((data) => {
-          if (!cancelled) {
+          if (!cancelled && version === mutationVersion.current) {
             // An older in-flight GET must not resurrect a successfully deleted record.
             setEvents(data.filter((event) => !deletedIds.current.has(event.id)));
             setStatus("ready");
           }
         })
         .catch((error: unknown) => {
-          if (!cancelled) setStatus(error instanceof UnauthorizedError ? "unauthorized" : "error");
+          if (!cancelled && version === mutationVersion.current) setStatus(error instanceof UnauthorizedError ? "unauthorized" : "error");
         });
     }, 300); // небольшая задержка, чтобы не слать запрос на каждую букву
 
@@ -78,7 +86,18 @@ function App({ initialTheme }: { initialTheme: Theme }) {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [from, to, query, activeTab]);
+  }, [from, to, query, activeTab, reload]);
+
+  function refreshAfterMutation() {
+    mutationVersion.current += 1;
+    setReload((value) => value + 1);
+  }
+
+  function closeEditor() {
+    const id = editing?.id;
+    setEditing(null);
+    if (id) requestAnimationFrame(() => document.getElementById(`event-actions-${id}`)?.focus());
+  }
 
   const visibleEvents = query.trim()
     ? events
@@ -98,9 +117,40 @@ function App({ initialTheme }: { initialTheme: Theme }) {
     try {
       const changed = await updateTaskStatus(id, newStatus);
       setEvents((current) => current.map((event) => event.id === id ? changed : event));
+      refreshAfterMutation();
     } catch (error: unknown) {
       if (error instanceof UnauthorizedError) setStatus("unauthorized");
       else setMutationError("Не удалось изменить статус. Попробуйте ещё раз.");
+    } finally {
+      updating.current.delete(id);
+      setUpdatingIds(new Set(updating.current));
+    }
+  }
+
+  async function handleEdit(id: string, changes: EventPatch) {
+    if (deleting.current.has(id) || updating.current.has(id) || deletedIds.current.has(id)) {
+      throw new Error("Запись уже изменяется. Дождитесь завершения операции.");
+    }
+    updating.current.add(id);
+    setUpdatingIds(new Set(updating.current));
+    setMutationError(null);
+    setMutationNotice(null);
+    try {
+      const payload = JSON.stringify(changes);
+      let operation = editOperations.current.get(id);
+      if (!operation || operation.payload !== payload) {
+        operation = { payload, operationId: crypto.randomUUID() };
+        editOperations.current.set(id, operation);
+      }
+      const changed = await updateEvent(id, changes, operation.operationId);
+      setEvents((current) => current.map((event) => event.id === id ? changed : event));
+      editOperations.current.delete(id);
+      closeEditor();
+      setMutationNotice("Изменения сохранены.");
+      refreshAfterMutation();
+    } catch (error: unknown) {
+      if (error instanceof UnauthorizedError) { setStatus("unauthorized"); setEditing(null); }
+      throw error;
     } finally {
       updating.current.delete(id);
       setUpdatingIds(new Set(updating.current));
@@ -112,6 +162,7 @@ function App({ initialTheme }: { initialTheme: Theme }) {
     deleting.current.add(id);
     setDeletingIds(new Set(deleting.current));
     setMutationError(null);
+    setMutationNotice(null);
     try {
       let operationId = deleteOperations.current.get(id);
       if (!operationId) {
@@ -121,6 +172,7 @@ function App({ initialTheme }: { initialTheme: Theme }) {
       await deleteEvent(id, operationId);
       deletedIds.current.add(id);
       setEvents((current) => current.filter((event) => event.id !== id));
+      refreshAfterMutation();
     } catch (error: unknown) {
       if (error instanceof UnauthorizedError) setStatus("unauthorized");
       else setMutationError("Не удалось удалить запись. Повторите попытку.");
@@ -174,6 +226,7 @@ function App({ initialTheme }: { initialTheme: Theme }) {
       }} />
 
       {mutationError && <p className="status-error" role="alert">{mutationError}</p>}
+      {mutationNotice && <p className="mutation-notice" role="status">{mutationNotice}</p>}
 
       {status === "loading" && <p className="status-message">Загрузка…</p>}
       {status === "error" && (
@@ -188,8 +241,10 @@ function App({ initialTheme }: { initialTheme: Theme }) {
       )}
       {status === "ready" && (
         <EventList events={visibleEvents} onStatusChange={handleStatusChange}
-          onDelete={handleDelete} deletingIds={deletingIds} updatingIds={updatingIds} />
+          onDelete={handleDelete} onEdit={setEditing} deletingIds={deletingIds} updatingIds={updatingIds} />
       )}
+      {editing && <EventEditor key={editing.id} event={editing} saving={updatingIds.has(editing.id)}
+        onSave={handleEdit} onClose={closeEditor} />}
     </div>
   );
 }

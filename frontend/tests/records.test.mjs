@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFileSync } from "node:child_process";
-import { createLongPress } from "../src/longPress.ts";
 import { formatMoment } from "../src/formatMoment.ts";
 
 const record = {
@@ -9,55 +8,6 @@ const record = {
   status: "todo", date: null, datetime: null, end_time: null,
   created_at: "2026-10-30T10:00:00Z",
 };
-
-test("long press reveals once, while releasing early cancels", (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  let revealed = 0;
-  const press = createLongPress(() => revealed++);
-  press.start(1, 20, 20);
-  t.mock.timers.tick(549);
-  assert.equal(revealed, 0);
-  press.cancel(1);
-  t.mock.timers.tick(1000);
-  assert.equal(revealed, 0);
-  press.start(1, 20, 20);
-  t.mock.timers.tick(550);
-  assert.equal(revealed, 1);
-  t.mock.timers.tick(1000);
-  assert.equal(revealed, 1);
-});
-
-test("movement, scrolling cleanup and a replacement gesture cancel a hold", (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  let revealed = 0;
-  const press = createLongPress(() => revealed++);
-  press.start(1, 20, 20);
-  press.move(1, 20, 31);
-  t.mock.timers.tick(600);
-  assert.equal(revealed, 0);
-  press.start(1, 20, 20);
-  press.cancel(); // scroll / blur / component unmount
-  t.mock.timers.tick(600);
-  assert.equal(revealed, 0);
-  press.start(1, 20, 20);
-  t.mock.timers.tick(500);
-  press.start(2, 20, 20);
-  t.mock.timers.tick(50);
-  assert.equal(revealed, 0);
-  press.cancel(1); // releasing another pointer must not cancel the active one
-  t.mock.timers.tick(500);
-  assert.equal(revealed, 1);
-});
-
-test("small pointer jitter does not cancel an intentional hold", (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  let revealed = 0;
-  const press = createLongPress(() => revealed++);
-  press.start(1, 20, 20);
-  press.move(1, 23, 24);
-  t.mock.timers.tick(550);
-  assert.equal(revealed, 1);
-});
 
 test("tasks and meetings display both range boundaries", () => {
   const start = "2026-10-30T10:00:00Z";

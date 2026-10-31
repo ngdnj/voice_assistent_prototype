@@ -1,5 +1,6 @@
 import { buildTestInitData } from "./testAuth";
 import type { EventRecord, TaskStatus } from "./types";
+import type { EventPatch } from "./eventEditing";
 
 // Mini App и REST работают на одном домене: Caddy отдаёт сайт и проксирует /api.
 // При `npm run dev` запросы /api проксирует Vite (vite.config.ts).
@@ -80,6 +81,17 @@ export async function deleteEvent(id: string, operationId: string): Promise<Even
   });
   const body = await readBody(response, "Не удалось удалить запись");
   return recordResult(body, "deleted", id);
+}
+
+export async function updateEvent(id: string, changes: EventPatch, operationId: string): Promise<EventRecord> {
+  const headers = await authHeaders();
+  const params = new URLSearchParams({ timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
+  const response = await fetch(`${API_BASE}/events/${encodeURIComponent(id)}?${params}`, {
+    method: "PATCH",
+    headers: { ...headers, "Content-Type": "application/json", "X-Action-Id": operationId },
+    body: JSON.stringify(changes),
+  });
+  return recordResult(await readBody(response, "Не удалось сохранить изменения"), "updated", id);
 }
 
 export async function searchEvents(query: string, eventType: string): Promise<EventRecord[]> {

@@ -36,6 +36,16 @@ def _respond(result: dict[str, Any]) -> JSONResponse:
     return JSONResponse(result)
 
 
+def _action_context(caller: TrustedContext, action_id: str | None) -> TrustedContext | dict[str, Any]:
+    try:
+        if action_id is None or len(action_id) > 200:
+            raise ValueError("missing or excessive action id")
+        operation_id = str(UUID(action_id))
+    except ValueError:
+        return error("validation_error", "Передайте UUID операции в X-Action-Id", ACTION_ID_HEADER)
+    return replace(caller, action_id=operation_id)
+
+
 def build_records_router(
     tools: EventTools,
     *,
@@ -146,15 +156,44 @@ def build_records_router(
     ) -> JSONResponse:
         async def remove(caller: TrustedContext) -> dict[str, Any]:
             # The adapter establishes identity first; a UUID correlates retries, not users.
-            try:
-                if action_id is None or len(action_id) > 200:
-                    raise ValueError("missing or excessive action id")
-                operation_id = str(UUID(action_id))
-            except ValueError:
-                return error("validation_error", "Передайте UUID операции в X-Action-Id", ACTION_ID_HEADER)
-            return await tools.delete_event(replace(caller, action_id=operation_id), {"event_id": event_id})
+            action = _action_context(caller, action_id)
+            return (
+                action
+                if isinstance(action, dict)
+                else await tools.delete_event(action, {"event_id": event_id})
+            )
 
         # Deletion has no local dates. Neither body nor query can set the record's owner.
         return await respond("delete_event", owner, "UTC", remove)
+
+    @router.patch("/events/{event_id}")
+    async def update_event(
+        owner: Owner,
+        event_id: str,
+        request: Request,
+        timezone: Text = None,
+        action_id: Annotated[str | None, Header(alias=ACTION_ID_HEADER)] = None,
+    ) -> JSONResponse:
+        async def change(caller: TrustedContext) -> dict[str, Any]:
+            action = _action_context(caller, action_id)
+            if isinstance(action, dict):
+                return action
+            try:
+                body = await request.json()
+            except ValueError:
+                body = None
+            allowed = {"name", "date", "datetime", "end_time", "clear_schedule", "clear_end_time"}
+            if not isinstance(body, dict) or not body or set(body) - allowed:
+                return error("validation_error", "Передайте только изменяемые название, дату и время", None)
+            for field, value in body.items():
+                if value is None:
+                    return error(
+                        "validation_error",
+                        "Для снятия срока используйте clear_schedule, для окончания — clear_end_time",
+                        field,
+                    )
+            return await tools.update_event(action, {**body, "event_id": event_id})
+
+        return await respond("update_event", owner, timezone, change)
 
     return router

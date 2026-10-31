@@ -76,6 +76,12 @@ def _moment(value: Any, field: str, *, required: bool = False) -> datetime | Non
     return moment
 
 
+def _flag(value: Any, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise ArgumentError("Ожидается true или false", field)
+    return value
+
+
 def _date(value: Any, field: str) -> date | None:
     if value is None:
         return None
@@ -121,6 +127,8 @@ def _period(start: Any, end: Any, *, required: bool) -> tuple[datetime | None, d
 
 # Planner messages are English; the agent gets a short Russian explanation and the argument name.
 _PLANNER_FIELDS = (
+    ("clear_schedule", "date", "Снять срок можно только у задачи и без одновременного указания дат"),
+    ("clear_end_time", "end_time", "Нельзя одновременно указать и убрать окончание"),
     ("task_date", "date", "Дата без времени допустима только у задачи"),
     ("record_end", "end_time", "Окончание можно менять только у задачи или встречи"),
     ("description", "description", "Описание длиннее 2000 символов"),
@@ -180,6 +188,8 @@ class EventTools:
                     moment=_moment(arguments.get("datetime"), "datetime"),
                     day=_date(arguments.get("date"), "date"),
                     end_time=_moment(arguments.get("end_time"), "end_time"),
+                    clear_schedule=_flag(arguments.get("clear_schedule", False), "clear_schedule"),
+                    clear_end_time=_flag(arguments.get("clear_end_time", False), "clear_end_time"),
                 )
         except ArgumentError as exc:
             return error("validation_error", exc.message, exc.field)

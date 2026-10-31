@@ -29,8 +29,16 @@ class EventService:
         moment: datetime | None = None,
         day: date | None = None,
         end_time: datetime | None = None,
+        clear_schedule: bool = False,
+        clear_end_time: bool = False,
     ) -> EventRecord | None:
-        if all(value is None for value in (name, moment, day, end_time)):
+        if not isinstance(clear_schedule, bool) or not isinstance(clear_end_time, bool):
+            raise ValueError("clear_schedule and clear_end_time must be boolean")
+        if clear_schedule and (any(value is not None for value in (moment, day, end_time)) or clear_end_time):
+            raise ValueError("clear_schedule cannot be combined with date or time changes")
+        if clear_end_time and end_time is not None:
+            raise ValueError("clear_end_time cannot be combined with end_time")
+        if all(value is None for value in (name, moment, day, end_time)) and not (clear_schedule or clear_end_time):
             raise ValueError("No changes provided")
         if name is not None:
             if not isinstance(name, str) or not name.strip():
@@ -39,7 +47,11 @@ class EventService:
             check_name_length(name, "title")
         day, moment = normalize_due(day, moment)
         end_time = None if end_time is None else to_utc(end_time)
-        data = {"event_id": str(event_id)}
+        data: dict[str, str] = {"event_id": str(event_id)}
+        if clear_schedule:
+            data["clear_schedule"] = "true"
+        if clear_end_time:
+            data["clear_end_time"] = "true"
         for field, value in (("name", name), ("datetime", moment), ("date", day), ("end_time", end_time)):
             if value is not None:
                 data[field] = value if isinstance(value, str) else value.isoformat()
@@ -51,6 +63,10 @@ class EventService:
         if previous is None:
             return await self._repository.replay(owner_id=owner_id, operation=operation, kind="update_event")
         now = to_utc(self._clock())
+        if clear_schedule and not isinstance(previous, Task):
+            raise ValueError("clear_schedule is only supported for tasks")
+        if clear_end_time and not isinstance(previous, Task | Meeting):
+            raise ValueError("record_end is only supported for tasks and meetings")
         if not isinstance(previous, Task) and day is not None:
             raise ValueError("task_date is only supported for tasks")
         if not isinstance(previous, Task | Meeting) and end_time is not None:
@@ -58,6 +74,8 @@ class EventService:
         record: EventRecord
         if isinstance(previous, Meeting):
             record = move_meeting(previous, starts_at=moment, ends_at=end_time)
+            if clear_end_time:
+                record = replace(record, ends_at=None)
             record = replace(record, title=name if name is not None else record.title)
         elif isinstance(previous, Reminder):
             if moment is not None and moment < now:
@@ -68,9 +86,11 @@ class EventService:
                 remind_at=moment if moment is not None else previous.remind_at,
             )
         else:
-            change_due = day is not None or moment is not None
+            change_due = clear_schedule or day is not None or moment is not None
             task_end = previous.ends_at
-            if day is not None:
+            if clear_schedule or clear_end_time:
+                task_end = None
+            elif day is not None:
                 if end_time is not None:
                     raise ValueError("ends_at requires due_at, not a date-only deadline")
                 task_end = None
