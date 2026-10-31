@@ -46,7 +46,9 @@ export function EventEditor({ event, saving, onSave, onClose }: Props) {
         {draft.mode !== "none" && <div className="editor-fields">
           <label>Дата<input name="date" type="date" required value={draft.date}
             onChange={(e) => setDraft({ ...draft, date: e.target.value })} /></label>
-          {draft.mode === "time" && <label>Время<input name="time" type="time" required value={draft.time}
+          {draft.mode === "time" && <label>Время<input name="time" type="text" required value={draft.time}
+            placeholder="ЧЧ:ММ" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" maxLength={5}
+            title="24-часовой формат, например 18:30" autoComplete="off"
             onChange={(e) => setDraft({ ...draft, time: e.target.value })} /></label>}
         </div>}
         {draft.mode === "time" && event.event_type !== "reminder" && <>
@@ -55,7 +57,9 @@ export function EventEditor({ event, saving, onSave, onClose }: Props) {
           {draft.range && <div className="editor-fields">
             <label>Дата окончания<input name="endDate" type="date" required value={draft.endDate}
               onChange={(e) => setDraft({ ...draft, endDate: e.target.value })} /></label>
-            <label>Время окончания<input name="endTime" type="time" required value={draft.endTime}
+            <label>Время окончания<input name="endTime" type="text" required value={draft.endTime}
+              placeholder="ЧЧ:ММ" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" maxLength={5}
+              title="24-часовой формат, например 18:30" autoComplete="off"
               onChange={(e) => setDraft({ ...draft, endTime: e.target.value })} /></label>
           </div>}
         </>}

@@ -141,7 +141,7 @@ async function save() { await click('.editor-save'); }
 try {
   await waitFor(async () => { try { return (await fetch(driverBase+'/status')).ok; } catch {return false;} }, 'driver start');
   session=(await command('/session',{capabilities:{alwaysMatch:{browserName:'chrome','goog:chromeOptions':{
-    binary:process.env.CHROME_BIN??'/usr/bin/chromium',args:['--headless=new','--disable-background-networking','--no-proxy-server','--window-size=450,850']
+    binary:process.env.CHROME_BIN??'/usr/bin/chromium',args:['--headless=new','--disable-background-networking','--no-proxy-server','--lang=en-US','--window-size=450,850']
   }}}})).sessionId;
   await command(`/session/${session}/goog/cdp/execute`,{cmd:'Page.addScriptToEvaluateOnNewDocument',params:{source:
     "window.WebApp={initData:'synthetic-test-init-data'};const OriginalDate=Date;window.Date=class extends OriginalDate{constructor(...a){super(...(a.length?a:['2026-10-30T09:00:00Z']));}static now(){return new OriginalDate('2026-10-30T09:00:00Z').getTime();}};"}});
@@ -155,7 +155,24 @@ try {
   assert.equal(await run("return !!document.querySelector('[role=menu]')"),false);
   await menu();await click('h1');assert.equal(await run("return !!document.querySelector('[role=menu]')"),false);
   holdNextRead=true;await setValue('.status-select','in_progress');await waitFor(()=>!!heldRead,'old GET held');
-  await edit();await setValue('[name=name]','Новый отчёт');await setValue('[name=time]','16:00');await setValue('[name=endTime]','18:00');
+  await edit();
+  // Even in an English browser, both fields accept direct 24-hour keyboard input.
+  for (const name of ['time','endTime']) {
+    const selector=`[name=${name}]`;
+    await setValue(selector,'');await key(selector,'23:59');
+    assert.equal(await run('return document.querySelector(arguments[0]).value',[selector]),'23:59');
+    for (const value of ['00:00','12:00','23:59']) {
+      await setValue(selector,value);
+      assert.equal(await run('return document.querySelector(arguments[0]).checkValidity()',[selector]),true);
+    }
+    for (const value of ['','24:00','12:60','9:05','13:00 PM']) {
+      await setValue(selector,value);
+      assert.equal(await run('return document.querySelector(arguments[0]).checkValidity()',[selector]),false);
+      await save();assert.equal(edits.length,0);
+    }
+    await setValue(selector,name==='time'?'16:00':'18:00');
+  }
+  await setValue('[name=name]','Новый отчёт');
   assert.equal(await run("return document.querySelector('dialog').scrollWidth<=document.querySelector('dialog').clientWidth"),true);
   await writeFile('/tmp/miniapp-editor-preview.png',Buffer.from(await command(`/session/${session}/screenshot`,undefined,'GET'),'base64'));
   await command(`/session/${session}/goog/cdp/execute`,{cmd:'Emulation.setDeviceMetricsOverride',params:{width:360,height:800,deviceScaleFactor:1,mobile:true}});
@@ -204,7 +221,7 @@ try {
   await click('[role=menuitem]:first-child');assert.equal(await run("return !!document.querySelector('[name=range]')"),false);
   await setValue('[name=time]','16:30');await save();await waitFor(()=>run("return !document.querySelector('dialog')"),'reminder time');
   await menu();await click('.event-menu-delete');await waitFor(()=>run("return !!document.querySelector('.empty-state')"),'reminder deleted');
-  console.log('Browser smoke passed: menu/edit/delete, ranges/date-only/no deadline, retries, stale GET, filtering, keyboard/touch, all types.');
+  console.log('Browser smoke passed: 24-hour keyboard input/validation in English locale, menu/edit/delete, ranges/date-only/no deadline, retries, stale GET, filtering, keyboard/touch, all types.');
 } catch(error) {
   console.error(driverLog.slice(-1000));
   if(session) {
